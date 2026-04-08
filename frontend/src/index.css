@@ -1,0 +1,41 @@
+@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  body {
+    background-color: #050511; /* Deeper telecom-dark */
+    background-image: 
+      radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%), 
+      radial-gradient(at 50% 0%, hsla(225,39%,30%,0.1) 0, transparent 50%), 
+      radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
+    color: #E5E7EB; /* gray-200 */
+    font-family: 'Inter', sans-serif;
+    -webkit-font-smoothing: antialiased;
+    background-attachment: fixed;
+  }
+}
+
+@layer utilities {
+  .glass-panel {
+    @apply bg-gray-900/40 backdrop-blur-md border border-gray-700/50 shadow-xl;
+  }
+}
+
+/* Custom Scrollbar for sleek UI */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #0B0F19; 
+}
+::-webkit-scrollbar-thumb {
+  background: #374151; 
+  border-radius: 4px;
+}
+::-webkit-scrollbar-thumb:hover {
+  background: #4B5563; 
+}

@@ -1,0 +1,56 @@
+# Virtual environment
+.venv/
+venv/
+env/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.egg-info/
+dist/
+build/
+*.egg
+
+# GCP Service Account - NEVER commit
+*.json
+!package.json
+!package-lock.json
+!tsconfig.json
+
+# Neo4j (full installation + data)
+neo4j/
+*.zip
+
+# Generated data
+datasets/seed_data/*.csv
+datasets/seed_data/*.parquet
+output/
+models/*.pkl
+
+# SQLite databases
+*.db
+*.sqlite
+*.sqlite3
+
+# IDE
+.vscode/
+.idea/
+*.swp
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Node
+node_modules/
+frontend/node_modules/
+frontend/dist/
+
+# Logs
+*.log
+logs/
+
+# Environment
+.env
+.env.local

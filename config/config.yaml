@@ -1,0 +1,150 @@
+# GAN-Based Synthetic Data Generation System — Configuration
+# All settings are configurable — change provider/model without touching code
+
+# === LLM Configuration ===
+llm:
+  provider: "gemini"                    # options: gemini, ollama
+  model: "gemini-2.5-flash-preview-04-17"  # Gemini 2.5 Flash
+  ollama_base_url: "http://localhost:11434"  # used if provider=ollama
+  ollama_model: "gemma3:4b"             # local model for production
+  temperature: 0.1                      # low temp for deterministic output
+  max_tokens: 4096                      # max output tokens
+  structured_output: true               # enforce JSON schema on every call
+  retry_max: 3                          # max retries on validation failure
+  confidence_threshold: 0.6             # below this → human review queue
+  service_account_path: "verizon-aid-091954da3180 (1).json"
+
+# === Database Configuration ===
+database:
+  # SQLite for POC (swap to PostgreSQL by changing this URL)
+  # PostgreSQL: "postgresql+asyncpg://user:pass@localhost:5432/synthetic_data"
+  url: "sqlite:///./synthetic_data.db"
+  echo: false                           # set true for SQL debug logging
+
+# === Neo4j Configuration ===
+neo4j:
+  uri: "bolt://localhost:7687"
+  username: "neo4j"
+  password: "synthetic_data_poc"
+  database: "neo4j"
+
+# === Data Source Configuration ===
+data_sources:
+  # For POC: local SQLite databases with seed data
+  # For production: JDBC connection strings to Oracle/PostgreSQL/MySQL
+  - name: "telecom_poc"
+    type: "sqlite"
+    connection_string: "sqlite:///./datasets/telecom_source.db"
+    dialect: "sqlite"
+
+# === Schema Ingestion ===
+ingestion:
+  sample_rows: 100                      # rows to sample for statistical profiling
+  ddl_directory: "datasets/ddl"         # directory containing DDL files
+  query_log_directory: "datasets/query_logs"
+  statistical_profile: true             # compute per-column statistics
+
+# === PII Detection ===
+presidio:
+  spacy_model: "en_core_web_lg"
+  confidence_threshold: 0.7             # below this → send to LLM
+  enabled_recognizers:
+    - PERSON
+    - EMAIL_ADDRESS
+    - PHONE_NUMBER
+    - CREDIT_CARD
+    - IBAN_CODE
+    - IP_ADDRESS
+    - NRP
+    - LOCATION
+    - DATE_TIME
+    - MEDICAL_LICENSE
+    - URL
+  custom_recognizers:
+    - SUBSCRIBER_ID
+    - IMSI
+    - NETWORK_ELEMENT_ID
+    - INTERNAL_ACCOUNT_CODE
+
+# === Generation Configuration ===
+generation:
+  ctgan_epochs: 300                     # training epochs for CTGAN
+  tvae_epochs: 300                      # training epochs for TVAE
+  row_count_thresholds:
+    ctgan_min: 2000                     # >= this → CTGAN
+    tvae_min: 200                       # >= this and < ctgan_min → TVAE
+    # < tvae_min → rule_based
+  model_save_dir: "models/trained"
+  edge_case_default_pct: 0.05          # 5% edge case injection default
+  faker_locale: "en_US"                 # Faker locale for masking
+
+# === Validation Thresholds ===
+validation:
+  ks_test_alpha: 0.05                   # KS test significance level
+  jsd_threshold: 0.15                   # Jensen-Shannon Divergence max
+  reid_risk_threshold: 0.85             # re-identification risk score max
+  max_retry_on_failure: 3               # max re-generation attempts
+
+# === Delivery ===
+delivery:
+  output_format: "parquet"              # parquet or csv
+  output_directory: "output/synthetic"
+  compress: true                        # gzip compression for delivery
+
+# === Pipeline ===
+pipeline:
+  human_review_mode: "skip"             # "wait" or "skip" — skip for automated POC
+  resume_on_crash: true                 # resume from last completed domain
+  domain_generation_order: "dependency" # "dependency" or "alphabetical"
+
+# === Abbreviation Dictionary (seeded) ===
+abbreviations:
+  CUST: "Customer"
+  TEN: "Tenure"
+  MNT: "Month"
+  SVC: "Service"
+  ORD: "Order"
+  AGT: "Agent"
+  ASSGN: "Assignment"
+  BLNG: "Billing"
+  CYC: "Cycle"
+  TYP: "Type"
+  DT: "Date"
+  CD: "Code"
+  ID: "Identifier"
+  NO: "Number"
+  AMT: "Amount"
+  QTY: "Quantity"
+  STAT: "Status"
+  REF: "Reference"
+  SEQ: "Sequence"
+  PRI: "Primary"
+  SEC: "Secondary"
+  ACT: "Active"
+  SUS: "Suspended"
+  TRM: "Terminated"
+  PDG: "Pending"
+  CLS: "Closed"
+  MSTR: "Master"
+  SUBSCR: "Subscriber"
+  ACCT: "Account"
+  ADDR: "Address"
+  CNTCT: "Contact"
+  IDENT: "Identity"
+  DOC: "Document"
+  HIST: "History"
+  NTWK: "Network"
+  ELEM: "Element"
+  TWR: "Tower"
+  INCDT: "Incident"
+  PYMT: "Payment"
+  MTHD: "Method"
+  INVC: "Invoice"
+  LN: "Line"
+  REC: "Record"
+  CDR: "Call Detail Record"
+  WRK: "Work"
+  PROV: "Provisioning"
+  ACTV: "Activation"
+  PLAN: "Plan"
+  FLD: "Field"

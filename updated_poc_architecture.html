@@ -1,0 +1,214 @@
+<style>
+*{box-sizing:border-box;margin:0;padding:0}
+.w{padding:1rem 0;font-family:var(--font-sans)}
+.legend{display:flex;gap:14px;flex-wrap:wrap;margin-bottom:20px;padding:10px 14px;border:0.5px solid var(--color-border-secondary);border-radius:10px;background:var(--color-background-secondary)}
+.li{display:flex;align-items:center;gap:6px;font-size:11px;color:var(--color-text-secondary)}
+.ld{width:10px;height:10px;border-radius:2px}
+.pb{border:0.5px dashed var(--color-border-secondary);border-radius:12px;padding:16px;margin-bottom:12px;background:var(--color-background-secondary)}
+.pt{font-size:10px;font-weight:500;color:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:.06em;margin-bottom:12px}
+.row{display:flex;gap:8px;flex-wrap:wrap;margin-bottom:6px}
+.node{background:var(--color-background-primary);border:0.5px solid var(--color-border-secondary);border-radius:8px;padding:10px 12px;cursor:pointer;transition:all .15s;flex:1;min-width:130px}
+.node:hover{border-color:var(--color-border-primary);transform:translateY(-1px)}
+.nt{font-size:12px;font-weight:500;color:var(--color-text-primary);margin-bottom:2px}
+.ns{font-size:11px;color:var(--color-text-tertiary);line-height:1.4}
+.node.coral{border-left:3px solid #D85A30}
+.node.purple{border-left:3px solid #7F77DD}
+.node.pink{border-left:3px solid #D4537E}
+.node.amber{border-left:3px solid #BA7517}
+.node.teal{border-left:3px solid #1D9E75}
+.node.green{border-left:3px solid #639922}
+.node.blue{border-left:3px solid #378ADD}
+.node.llm{border:0.5px solid rgba(127,119,221,0.4);background:rgba(127,119,221,0.06)}
+.node.llm:hover{border-color:#7F77DD}
+.node.llm .nt::before{content:'⟡ ';color:#7F77DD;font-size:10px}
+.arr{text-align:center;color:var(--color-text-tertiary);font-size:13px;margin:3px 0}
+.loop{background:rgba(127,119,221,0.06);border:0.5px dashed rgba(127,119,221,0.3);border-radius:8px;padding:10px 12px;margin:8px 0;font-size:11px;color:var(--color-text-secondary);line-height:1.6}
+.loop strong{color:var(--color-text-primary);font-weight:500}
+.badge{display:inline-block;font-size:9px;font-weight:500;padding:1px 6px;border-radius:8px;margin-left:5px;vertical-align:middle}
+.b-llm{background:rgba(127,119,221,0.15);color:#7F77DD}
+.b-presidio{background:rgba(52,211,153,0.12);color:#1D9E75}
+.b-out{background:rgba(99,153,34,0.12);color:#3B6D11}
+.roadmap{display:flex;gap:8px;margin-top:6px}
+.rc{flex:1;border:0.5px dashed var(--color-border-tertiary);border-radius:8px;padding:12px;background:var(--color-background-secondary)}
+.rct{font-size:11px;font-weight:500;color:var(--color-text-secondary);margin-bottom:6px}
+.rci{font-size:10px;color:var(--color-text-tertiary);padding:2px 0}
+.overlay{display:none;position:absolute;inset:0;background:rgba(0,0,0,.5);z-index:100;align-items:flex-start;justify-content:center;padding-top:32px}
+.overlay.active{display:flex}
+.modal{background:var(--color-background-primary);border:0.5px solid var(--color-border-secondary);border-radius:14px;padding:22px;width:100%;max-width:500px;position:relative;max-height:80vh;overflow-y:auto}
+.mt{font-size:10px;font-weight:500;padding:3px 10px;border-radius:20px;margin-bottom:10px;display:inline-block}
+.mh{font-size:16px;font-weight:500;color:var(--color-text-primary);margin-bottom:8px}
+.mb{font-size:13px;color:var(--color-text-secondary);line-height:1.7;margin-bottom:12px}
+.ml{background:rgba(127,119,221,0.06);border:0.5px solid rgba(127,119,221,0.3);border-radius:8px;padding:10px 12px;margin-bottom:12px;font-size:12px;color:var(--color-text-secondary);line-height:1.6}
+.ml-h{font-size:10px;font-weight:500;color:#7F77DD;margin-bottom:5px}
+.mtech{background:var(--color-background-secondary);border-radius:8px;padding:10px 12px;margin-bottom:12px}
+.mtl{font-size:10px;font-weight:500;color:var(--color-text-tertiary);margin-bottom:6px;text-transform:uppercase;letter-spacing:.04em}
+.tp{display:inline-block;font-size:10px;padding:2px 8px;border-radius:5px;border:0.5px solid var(--color-border-secondary);color:var(--color-text-secondary);margin:2px 3px 2px 0;font-family:var(--font-mono)}
+.mc{position:absolute;top:12px;right:12px;background:none;border:0.5px solid var(--color-border-secondary);border-radius:6px;width:26px;height:26px;cursor:pointer;font-size:14px;color:var(--color-text-secondary);display:flex;align-items:center;justify-content:center}
+.mc:hover{background:var(--color-background-secondary)}
+.closebtn{font-size:12px;padding:7px 16px;border-radius:7px;border:0.5px solid var(--color-border-secondary);background:var(--color-background-secondary);cursor:pointer;color:var(--color-text-primary)}
+</style>
+
+<div class="w" style="position:relative">
+<div id="ov" class="overlay" onclick="if(event.target===this)cm()">
+  <div class="modal">
+    <button class="mc" onclick="cm()">✕</button>
+    <div id="mt" class="mt"></div>
+    <div id="mh" class="mh"></div>
+    <div id="mb" class="mb"></div>
+    <div id="ml" class="ml" style="display:none"><div class="ml-h">⟡ LLM role in this component</div><div id="mlb"></div></div>
+    <div class="mtech"><div class="mtl">Tech stack</div><div id="mtech"></div></div>
+    <button class="closebtn" onclick="cm()">Close</button>
+  </div>
+</div>
+
+<div class="legend">
+  <div class="li"><div class="ld" style="background:#D85A30"></div>Ingestion & parsing</div>
+  <div class="li"><div class="ld" style="background:#7F77DD"></div>Knowledge graph</div>
+  <div class="li"><div class="ld" style="background:#D4537E"></div>Intelligence</div>
+  <div class="li"><div class="ld" style="background:#BA7517"></div>Generation</div>
+  <div class="li"><div class="ld" style="background:#1D9E75"></div>Validation</div>
+  <div class="li"><div class="ld" style="background:#7F77DD;opacity:.5"></div>⟡ LLM active</div>
+</div>
+
+<!-- LAYER 1 -->
+<div class="pb">
+  <div class="pt">Layer 1 — Schema ingestion & knowledge graph</div>
+  <div class="row">
+    <div class="node coral" onclick="om('ingestion')"><div class="nt">Data ingestion</div><div class="ns">Apache Spark → SQL sources</div></div>
+    <div class="node coral" onclick="om('sqlglot')"><div class="nt">SQLGlot parser</div><div class="ns">Extracts formal DDL relationships</div></div>
+    <div class="node coral" onclick="om('querylog')"><div class="nt">Query log miner</div><div class="ns">Discovers implicit JOIN relationships</div></div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="row">
+    <div class="node purple" onclick="om('neo4j')"><div class="nt">Neo4j knowledge graph</div><div class="ns">Full lineage + abbreviation dictionary</div></div>
+    <div class="node purple llm" onclick="om('partition')"><div class="nt">Domain partitioner <span class="badge b-llm">LLM</span></div><div class="ns">Graph traversal to cluster tables</div></div>
+  </div>
+  <div class="loop"><strong>LLM Loop 1 — Schema disambiguation:</strong> LLM traverses Neo4j on-demand via tool-calling to resolve ambiguous relationships. It reads only what it needs — no full schema in context. Unknown abbreviations are flagged, human-confirmed expansions written back into Neo4j.</div>
+</div>
+
+<!-- LAYER 2 -->
+<div class="pb">
+  <div class="pt">Layer 2 — PII detection & LLM semantic reasoning</div>
+  <div class="row">
+    <div class="node teal" onclick="om('presidio')"><div class="nt">Presidio PII scanner <span class="badge b-presidio">open source</span></div><div class="ns">Catches all standard PII first — fast & deterministic</div></div>
+    <div class="node teal" onclick="om('customrec')"><div class="nt">Custom recognisers</div><div class="ns">Telecom-specific PII patterns added to Presidio</div></div>
+  </div>
+  <div class="arr">↓ non-PII & uncertain columns only</div>
+  <div class="row">
+    <div class="node pink llm" onclick="om('llmreason')"><div class="nt">LLM semantic reasoner <span class="badge b-llm">LLM</span></div><div class="ns">Business sensitivity, constraints, edge cases, dedup mode</div></div>
+    <div class="node pink" onclick="om('abbrevdict')"><div class="nt">Abbreviation expander</div><div class="ns">Dictionary in Neo4j + value pattern analysis</div></div>
+    <div class="node pink" onclick="om('humanreview')"><div class="nt">Human review queue</div><div class="ns">Low-confidence & unknown abbreviations</div></div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="row">
+    <div class="node blue" onclick="om('postgres')"><div class="nt">PostgreSQL operational memory</div><div class="ns">All decisions stored permanently — LLM stateless</div></div>
+    <div class="node pink llm" onclick="om('genstrat')"><div class="nt">Generation strategy planner <span class="badge b-llm">LLM</span></div><div class="ns">Decides HOW and with what mode each table generates</div></div>
+  </div>
+  <div class="loop"><strong>LLM Loop 2 — Reasoning via graph traversal:</strong> The LLM never holds the full schema in memory. It calls Neo4j tools on-demand: get_table_schema(), get_relationships(), get_downstream_tables(), get_abbreviation(). It self-validates its output against the graph, retries up to 3 times, then routes to human review. PostgreSQL caches all decisions — columns already classified are never re-sent to the LLM.</div>
+</div>
+
+<!-- LAYER 3 -->
+<div class="pb">
+  <div class="pt">Layer 3 — Synthetic generation engine</div>
+  <div class="row">
+    <div class="node amber llm" onclick="om('tier')"><div class="nt">Table tier router <span class="badge b-llm">LLM</span></div><div class="ns">CTGAN / TVAE / rule-based — LLM decides</div></div>
+    <div class="node amber" onclick="om('ctgan')"><div class="nt">CTGAN via SDV</div><div class="ns">Graph-first multi-table generation</div></div>
+    <div class="node amber" onclick="om('junction')"><div class="nt">Junction table handler</div><div class="ns">Procedural many-to-many generation</div></div>
+  </div>
+  <div class="arr">↓</div>
+  <div class="row">
+    <div class="node amber" onclick="om('boundarykey')"><div class="nt">Boundary key registry</div><div class="ns">Cross-domain FK stitching via PostgreSQL</div></div>
+    <div class="node amber llm" onclick="om('edgecase')"><div class="nt">Edge case engine <span class="badge b-llm">LLM</span></div><div class="ns">LLM-flagged rare scenarios forced into output</div></div>
+    <div class="node amber llm" onclick="om('dedup')"><div class="nt">Dedup registry <span class="badge b-llm">LLM decides</span></div><div class="ns">LLM sets dedup mode per table — entity/ref/event</div></div>
+  </div>
+  <div class="loop"><strong>LLM Loop 3 — Generation strategy adaptation:</strong> LLM reads the full domain strategy from PostgreSQL and adapts: overrides tier routing based on temporal patterns, defines exact edge case injection percentages, sets deduplication mode per table (enforce / skip / partial), and writes the final generation plan back to PostgreSQL before CTGAN runs.</div>
+</div>
+
+<!-- LAYER 4 -->
+<div class="pb">
+  <div class="pt">Layer 4 — Validation gate</div>
+  <div class="row">
+    <div class="node teal" onclick="om('statvali')"><div class="nt">Statistical fidelity</div><div class="ns">KS-test & Jensen-Shannon divergence</div></div>
+    <div class="node teal" onclick="om('piiscan')"><div class="nt">PII leakage scan</div><div class="ns">Presidio second pass + re-ID risk score</div></div>
+    <div class="node teal" onclick="om('lineageval')"><div class="nt">Lineage integrity</div><div class="ns">Neo4j FK traversal verification</div></div>
+    <div class="node teal" onclick="om('bizrules')"><div class="nt">Business rule assertions</div><div class="ns">Great Expectations on LLM-defined rules</div></div>
+  </div>
+  <div class="loop"><strong>LLM Loop 4 — Failure diagnosis:</strong> When a check fails the LLM doesn't just say "regenerate." It reads the failure report, diagnoses the root cause, writes a corrected strategy to PostgreSQL, and triggers targeted re-generation of only the affected domain. Loops until all checks pass or max retries are hit.</div>
+  <div class="arr">↓ all checks pass</div>
+  <div class="row">
+    <div class="node green" onclick="om('delivery')"><div class="nt">Synthetic dataset — PLE delivery <span class="badge b-out">output</span></div><div class="ns">Privacy-safe · Faithful · Edge-case rich · Lineage-consistent</div></div>
+  </div>
+</div>
+
+<!-- ROADMAP -->
+<div style="margin-top:6px">
+  <div style="font-size:10px;font-weight:500;color:var(--color-text-tertiary);text-transform:uppercase;letter-spacing:.06em;margin-bottom:8px">Roadmap</div>
+  <div class="roadmap">
+    <div class="rc"><div class="rct">POC scope</div>
+      <div class="rci">• 2–3 domain relational SQL</div>
+      <div class="rci">• Gemini API (configurable)</div>
+      <div class="rci">• Presidio + LLM split</div>
+      <div class="rci">• Neo4j graph traversal</div>
+      <div class="rci">• LLM loops 1–4 active</div>
+    </div>
+    <div class="rc"><div class="rct">Phase 2 — Hardening</div>
+      <div class="rci">• Apache Flink interceptor</div>
+      <div class="rci">• Anomaly replay engine</div>
+      <div class="rci">• Near-duplicate vector detection</div>
+      <div class="rci">• Drift detection loop</div>
+      <div class="rci">• Many-to-many augmentation</div>
+    </div>
+    <div class="rc"><div class="rct">Phase 3 — Production</div>
+      <div class="rci">• Swap Gemini → local Gemma 4B</div>
+      <div class="rci">• Pipeline smoke test integration</div>
+      <div class="rci">• Full legacy schema support</div>
+      <div class="rci">• Real-time generation API</div>
+      <div class="rci">• All 6 LLM loops production-ready</div>
+    </div>
+  </div>
+</div>
+</div>
+
+<script>
+const D={
+ingestion:{tag:'Layer 1 · Ingestion',tc:'#D85A30',tb:'rgba(215,90,48,0.1)',title:'Data ingestion',body:'The entry point. Apache Spark connects to your SQL databases — Oracle, PostgreSQL, MySQL — via JDBC connectors. It reads table DDL structures and a statistical sample of rows. Nothing is permanently copied — it builds a metadata and statistical profile for every table. Think of it as a scanner walking through every room of a building, taking structural notes without moving anything.',tech:['Apache Spark','JDBC connectors','Delta Lake staging format'],llm:null},
+sqlglot:{tag:'Layer 1 · Parsing',tc:'#D85A30',tb:'rgba(215,90,48,0.1)',title:'SQLGlot parser',body:'SQLGlot reads all CREATE TABLE statements and extracts column definitions, data types, and formally declared foreign key relationships. It supports Oracle, PostgreSQL, MySQL, Snowflake dialects — no changes needed per source. This gives the system all explicitly declared relationships. Think of it as reading the official blueprint of a building.',tech:['SQLGlot open-source SQL parser','DDL statement extraction','Multi-dialect support'],llm:null},
+querylog:{tag:'Layer 1 · Discovery',tc:'#D85A30',tb:'rgba(215,90,48,0.1)',title:'Query log miner',body:'In legacy systems, many table relationships are never written as formal foreign keys — they exist only in application code. The query log miner reads historical SQL query logs and extracts every JOIN pattern. If two tables are joined together in thousands of historical queries, that is a real relationship even if nobody declared it formally. This catches the hidden connections SQLGlot alone would miss. Relationships with high query frequency get high confidence scores; rare ones get flagged for review.',tech:['SQL query log parsing via SQLGlot query parser','JOIN pattern frequency analysis','Confidence scoring per discovered relationship'],llm:null},
+neo4j:{tag:'Layer 1 · Knowledge Graph',tc:'#7F77DD',tb:'rgba(127,119,221,0.1)',title:'Neo4j knowledge graph',body:'The central brain of the entire system. Every table is a node. Every relationship — formal FK or mined from query logs — is a directed edge with metadata: relationship type, confidence score, cardinality. The graph also stores the abbreviation dictionary as node properties, domain partition assignments, and LLM reasoning outputs. Everything downstream reads from this graph. It is never wiped — it grows and evolves over the lifecycle of the project.',tech:['Neo4j graph database','Cypher query language','Louvain community detection','Abbreviation dictionary as node properties'],llm:null},
+partition:{tag:'Layer 1 · Partitioning',tc:'#7F77DD',tb:'rgba(127,119,221,0.1)',title:'Domain partitioner',body:'Groups tightly connected tables into business domains — Customer Management, Order Management, Network Provisioning, Billing. The LLM participates actively in this via graph traversal, not passive clustering. When the Louvain algorithm produces ambiguous groupings, the LLM traverses the graph to reason about domain boundaries using business semantics.',tech:['Louvain community detection','Neo4j graph traversal tools','LangChain Neo4j toolkit','Manual override stored in Neo4j'],llm:'The LLM calls get_table_cluster_suggestion() to see the algorithm output, then traverses edges to check boundary tables. If a shared reference table touches both Billing and Orders, the LLM reasons from column semantics and query frequency to assign it to the correct domain. It writes the final partition assignment back to Neo4j as node properties.'},
+presidio:{tag:'Layer 2 · PII Detection',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'Presidio PII scanner',body:'Presidio runs first on every column\'s sample values before the LLM ever gets involved. It uses a combination of named entity recognition, regex pattern matching, and context-aware rules to detect standard PII types: names, phone numbers, emails, credit card numbers, national IDs, addresses, dates of birth, and more. It is fast, deterministic, and excellent at what it does. Columns Presidio flags go directly to masking strategy — the LLM never touches them. Only columns Presidio passes or marks uncertain go to the LLM.',tech:['Microsoft Presidio','spaCy NER models (en_core_web_lg)','Presidio structured data analyser','Pattern-based PII detection'],llm:null},
+customrec:{tag:'Layer 2 · Custom PII',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'Custom recognisers',body:'Presidio does not know about telecom-specific sensitive data out of the box — subscriber IDs, IMSI numbers, internal account codes, network element IDs. Custom recognisers are built once during project onboarding and added to Presidio\'s pipeline. They use the same regex + context pattern as built-in recognisers. After onboarding, they run automatically on every schema analysis. This is a one-time configuration investment that makes Presidio domain-aware.',tech:['Presidio custom recogniser framework','Telecom-specific regex patterns','Context word lists for validation','One-time onboarding configuration'],llm:null},
+llmreason:{tag:'Layer 2 · Semantic Intelligence',tc:'#D4537E',tb:'rgba(212,83,126,0.1)',title:'LLM semantic reasoner',body:'The LLM only receives what Presidio could not resolve: columns that are not standard PII but might be business-sensitive, and columns where the semantic meaning needs reasoning to understand constraint profiles. It traverses the Neo4j graph on demand using tool-calling — it never receives a full schema dump. It reasons about: business sensitivity beyond PII, what constraints make values realistic, what edge cases matter for downstream AI pipelines, and what deduplication mode each table needs.',tech:['Gemini API (POC)','Gemma 4B via Ollama (production)','LangChain tool-calling agent','Pydantic structured JSON output','skill.md agentic workflow'],llm:'The LLM calls specific Neo4j tools: get_table_schema(table), get_relationships(table), get_downstream_tables(table), get_abbreviation(token), get_domain(table). It never receives more than one table\'s context at a time. After reasoning, it outputs structured JSON: {column, sensitivity, masking_strategy, constraint_profile, edge_case_flags, dedup_mode}. Output is validated against Pydantic schema before writing to PostgreSQL. Failed validation triggers retry up to 3 times.'},
+abbrevdict:{tag:'Layer 2 · Abbreviation Resolution',tc:'#D4537E',tb:'rgba(212,83,126,0.1)',title:'Abbreviation expander',body:'Enterprise legacy systems are full of column names like CUST_TEN_MNT, SVC_ORD_DT, AGT_ASSGN_CD and values like ACT, SUS, TRM, PDG. The abbreviation expander has two mechanisms working together. First: an abbreviation dictionary stored as node properties in Neo4j, seeded during project onboarding with common expansions (TEN→Tenure, MNT→Month, SVC→Service etc). Second: value pattern analysis — even if the LLM cannot expand an abbreviation, knowing that STATUS_CD has 4 values each appearing 25% of the time tells it this is a finite categorical regardless of what the values mean.',tech:['Abbreviation dictionary in Neo4j node properties','Value frequency distribution analysis','LLM contextual expansion using surrounding columns','Human-confirmed expansions written back to Neo4j'],llm:'When the LLM encounters an unknown token in a column name or value set, it calls get_abbreviation(token) on Neo4j. If not found, it tries to infer from surrounding column context in the same table. If still uncertain, it flags the column as ABBREVIATION_UNKNOWN and routes to human review. The human-confirmed expansion is written back to Neo4j for all future uses.'},
+humanreview:{tag:'Layer 2 · Governance',tc:'#D4537E',tb:'rgba(212,83,126,0.1)',title:'Human review queue',body:'When the LLM classifies with low confidence, when three retries produce inconsistent output, or when an abbreviation cannot be resolved, the column gets flagged for human review. A data steward sees the column metadata, the LLM\'s best guess, and the reason for flagging. They approve or correct the classification. All human decisions are stored in PostgreSQL as the audit trail and confirmed abbreviations are written back to Neo4j.',tech:['PostgreSQL flagged column table','Simple review web UI','Audit log of all human decisions','Abbreviation confirmation writes back to Neo4j'],llm:null},
+postgres:{tag:'Layer 2 · Memory',tc:'#378ADD',tb:'rgba(55,138,221,0.1)',title:'PostgreSQL operational memory',body:'Every decision the LLM makes is written to PostgreSQL immediately after each call: column PII classification, masking strategy, constraint profile, edge case flags, deduplication mode, generation strategy, tier assignment. If the system crashes mid-run, it resumes from exactly where it stopped. Columns already in PostgreSQL are never re-sent to the LLM — the system reads the stored decision. This makes the LLM completely stateless and the database the single source of truth.',tech:['PostgreSQL','Column policy table','Run log and resume capability','Generation strategy table','Dedup mode table','Model registry'],llm:null},
+genstrat:{tag:'Layer 2 · Strategy',tc:'#D4537E',tb:'rgba(212,83,126,0.1)',title:'Generation strategy planner',body:'After classifying all columns in a domain, the LLM takes a step back and writes a domain-level generation plan. It considers: temporal dependencies between columns that CTGAN cannot learn from data alone, business rules that must be enforced post-generation, the optimal table generation order within the domain, and whether any tables need hybrid approaches. This plan is stored in PostgreSQL and read by the generation engine.',tech:['LLM domain-level reasoning','PostgreSQL generation plan table','Temporal dependency detection','Business rule constraint definitions'],llm:'The LLM reads the full domain\'s column policies from PostgreSQL and writes: "Table ORDERS has ORDER_DATE→SHIP_DATE temporal dependency — inject post-generation constraint. Table CUSTOMER_PREFS has bimodal distribution in USAGE_BAND — use TVAE not rule-based despite 180 rows. Table STATUS_CODES has only 5 unique values — skip deduplication entirely, all repeats valid." This plan drives all of Layer 3.'},
+tier:{tag:'Layer 3 · Routing',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'Table tier router',body:'Routes each table to the right generation engine. Default routing is by row count: 2000+ rows gets CTGAN, 200-2000 gets TVAE, under 200 gets rule-based. But the LLM\'s generation strategy from Layer 2 overrides this default. A 180-row table with complex distributions gets TVAE. A 5000-row table with temporal dependencies gets CTGAN plus post-processing constraints. The tier router reads both the row count and the LLM strategy from PostgreSQL.',tech:['Row count analysis','LLM strategy override from PostgreSQL','CTGAN / TVAE / rule-based routing logic'],llm:'The LLM set the strategy in Loop 2. The tier router is the execution layer that reads and applies it. The LLM does not get called again here — it already wrote its decision to PostgreSQL.'},
+ctgan:{tag:'Layer 3 · Generation',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'CTGAN via SDV',body:'CTGAN is a neural network designed for tabular data. It learns cross-column correlations — not just individual column distributions but how columns relate to each other. SDV wraps CTGAN with multi-table awareness via the HMA algorithm: it generates tables parent-to-child so every FK relationship is consistent. After the first training run, the model is saved as a .pkl file. Every subsequent generation run loads the saved model — no retraining. Retraining is triggered only when drift detection detects significant distribution change.',tech:['CTGAN — Conditional Tabular GAN','SDV — Synthetic Data Vault','HMA — Hierarchical Modelling Algorithm','Model persisted as .pkl file'],llm:null},
+junction:{tag:'Layer 3 · Relationships',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'Junction table handler',body:'Many-to-many relationships — a customer linked to multiple plans, an agent assigned to multiple work orders — use junction tables. CTGAN handles these poorly. The system generates them procedurally: analyse the real junction table to understand the relationship distribution (on average how many plans per customer, what is the spread), then sample from already-generated parent tables according to that distribution. Statistically faithful and referentially consistent.',tech:['Procedural generation logic','Real junction table distribution analysis','Parent key sampling from boundary key registry'],llm:null},
+boundarykey:{tag:'Layer 3 · Stitching',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'Boundary key registry',body:'After each domain finishes generating, all primary keys of generated records are stored in the boundary key registry in PostgreSQL. When the next domain generates, it pulls valid keys from the registry to use as foreign key values. This ensures an Order record references a Customer ID that actually exists in the synthetic customer table — even though they were generated in separate SDV runs. This is the glue that makes multi-domain generation coherent.',tech:['PostgreSQL boundary key table','Domain-ordered generation sequence','FK validation before each domain run'],llm:null},
+edgecase:{tag:'Layer 3 · Coverage',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'Edge case engine',body:'The LLM flagged which column combinations and scenarios are rare but critical for downstream AI pipeline testing — those flags are stored in PostgreSQL. The edge case engine reads them and forces CTGAN to generate a configurable percentage of records representing those scenarios. Without this, rare but critical combinations might statistically never appear in the synthetic output and the AI pipeline would never be tested against them.',tech:['Conditional CTGAN sampling','PostgreSQL edge case flag table','Configurable coverage percentage per scenario'],llm:'The LLM defined these scenarios during Loop 2 reasoning: not just statistically rare values but semantically important combinations for AI pipeline testing. "Generate 5% of synthetic customers with high-tenure + recent complaint + expiring contract — this is the exact churn pattern the model must catch." The edge case engine executes this instruction.'},
+dedup:{tag:'Layer 3 · Deduplication',tc:'#BA7517',tb:'rgba(186,117,23,0.1)',title:'Deduplication registry',body:'Deduplication is not blanket applied. The LLM classified every table into one of three deduplication modes during Layer 2 reasoning. Entity tables (customers, accounts) get strict deduplication — every record must be unique. Reference tables (status codes, plan types) get no deduplication — the same values will and should repeat. Event tables (calls, transactions) get partial deduplication — FK columns repeat but full records should be unique. The dedup registry applies the correct mode per table.',tech:['SHA-256 record hashing','PostgreSQL dedup mode table (entity/reference/event)','PostgreSQL hash registry','Mode-aware dedup logic'],llm:'During Layer 2, the LLM set the dedup mode for each table: "CUSTOMERS → entity → strict dedup. STATUS_CODES → reference → no dedup, 3 valid values will repeat thousands of times. CALL_RECORDS → event → partial dedup, same customer FK repeats, full records unique." This decision is stored and the dedup registry simply executes it.'},
+statvali:{tag:'Layer 4 · Validation',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'Statistical fidelity check',body:'Compares every column\'s distribution in the synthetic data against the real data using two statistical tests. The Kolmogorov-Smirnov test measures whether two distributions come from the same underlying distribution. Jensen-Shannon Divergence measures the information-theoretic distance between distributions. If either test fails beyond threshold for any column flagged as important, the domain is rejected. The LLM then diagnoses why.',tech:['SciPy KS test','Jensen-Shannon Divergence','Great Expectations assertion framework','Per-column importance weighting from PostgreSQL'],llm:'When this check fails, the LLM reads the failure report and diagnoses root cause: "MONTHLY_SPEND has bimodal distribution that CTGAN collapsed to unimodal — switch this table to TVAE with explicit mode separation." It writes the corrected strategy to PostgreSQL and triggers targeted re-generation of only the affected table within the domain.'},
+piiscan:{tag:'Layer 4 · Validation',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'PII leakage scan',body:'A second independent Presidio scan runs over the entire generated dataset. This catches any real PII values that might have surfaced despite masking — particularly likely for very rare values that are statistically unique in the real data. It also computes a re-identification risk score: a measure of whether a synthetic record could be matched back to a real person using enough background knowledge. Records above threshold are removed and regenerated.',tech:['Microsoft Presidio second pass','Custom recognisers (same as Layer 2)','Re-identification risk scoring','Record removal and regeneration trigger'],llm:null},
+lineageval:{tag:'Layer 4 · Validation',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'Lineage integrity check',body:'Traverses the Neo4j knowledge graph and verifies every FK relationship holds in the generated dataset. Every child record must reference an existing parent. Every junction table entry must have valid records on both sides. Every aggregation dependency must resolve. If any relationship is broken, the affected domain is flagged and re-generated. This guarantees the testing team receives data that makes sense as a connected system.',tech:['Neo4j Cypher traversal queries','FK constraint verification across all domains','Cross-domain relationship validation','Junction table integrity check'],llm:null},
+bizrules:{tag:'Layer 4 · Validation',tc:'#1D9E75',tb:'rgba(29,158,117,0.1)',title:'Business rule assertions',body:'The LLM defined business rules during Layer 2 reasoning — temporal dependencies, correlation expectations, value range constraints beyond simple min/max. These rules are stored in PostgreSQL as Great Expectations assertions. This check runs those assertions against the generated data. For example: ORDER_DATE must always precede SHIP_DATE. CONTRACT_END must be after CONTRACT_START. These rules catch logically invalid data that statistical checks would miss.',tech:['Great Expectations assertion framework','LLM-defined business rules from PostgreSQL','Temporal constraint validation','Cross-column correlation assertions'],llm:null},
+delivery:{tag:'Output',tc:'#639922',tb:'rgba(99,153,34,0.1)',title:'Synthetic dataset — PLE delivery',body:'Once all four validation checks pass, the synthetic dataset is packaged and delivered to the PLE testing environment. It contains complete coherent data across all domains — statistically faithful to real distributions, free of any real PII, rich in edge cases the testing team needs, consistent across all FK relationships, and with the correct deduplication mode applied per table. A delivery manifest accompanies every dataset showing which validations passed, edge case coverage achieved, and which tables used which generation strategy.',tech:['Parquet or CSV export','Delivery manifest with full validation report','Edge case coverage summary','Generation lineage trace per table'],llm:null}
+};
+
+function om(k){
+  const d=D[k];if(!d)return;
+  document.getElementById('mt').textContent=d.tag;
+  document.getElementById('mt').style.background=d.tb;
+  document.getElementById('mt').style.color=d.tc;
+  document.getElementById('mh').textContent=d.title;
+  document.getElementById('mb').textContent=d.body;
+  const lb=document.getElementById('ml');
+  if(d.llm){lb.style.display='block';document.getElementById('mlb').textContent=d.llm;}
+  else lb.style.display='none';
+  document.getElementById('mtech').innerHTML=d.tech.map(t=>`<span class="tp">${t}</span>`).join('');
+  document.getElementById('ov').classList.add('active');
+}
+function cm(){document.getElementById('ov').classList.remove('active')}
+document.addEventListener('keydown',e=>{if(e.key==='Escape')cm()});
+</script>

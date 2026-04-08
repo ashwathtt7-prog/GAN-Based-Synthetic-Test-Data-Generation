@@ -1,0 +1,11 @@
+# Domain Override Configuration
+# Manual overrides for domain partition assignments
+# Format: table_name: domain_name
+# These override the Louvain + LLM domain partitioning results
+
+overrides:
+  # Example: force SVC_PLAN_REF into Customer domain despite graph clustering
+  # SVC_PLAN_REF: "customer_management"
+  
+  # Shared reference tables — assign to the domain that owns them logically
+  SVC_PLAN_REF: "customer_management"
