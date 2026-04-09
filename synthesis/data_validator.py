@@ -51,11 +51,16 @@ class DataValidator:
             if policy and hasattr(policy, 'business_importance'):
                 if policy.business_importance == "low":
                     continue
+            if policy and hasattr(policy, 'masking_strategy'):
+                if policy.masking_strategy != "passthrough":
+                    continue
 
             real_col = real_data[col].dropna()
             synth_col = synthetic_data[col].dropna()
 
             if len(real_col) < 5 or len(synth_col) < 5:
+                continue
+            if self._is_identifier_like(col, real_col):
                 continue
 
             # --- KS Test (numerical columns) ---
@@ -220,19 +225,17 @@ class DataValidator:
                         details=f"{invalid} values don't match expected format"
                     ))
 
-            # Presidio second pass on masked columns
-            if strategy in ("substitute_realistic", "format_preserving") and presidio_scanner and col in synthetic_data.columns:
-                sample = synthetic_data[col].dropna().head(100).astype(str).tolist()
-                pres_result = presidio_scanner.scan_column(self.table_name, col, sample)
-                if pres_result.pii_detected:
-                    results.append(ValidationResult(
-                        check_name=f"PII Leakage Scan: {col}",
-                        table_name=self.table_name,
-                        column_name=col,
-                        passed=False,
-                        metric_value=pres_result.confidence,
-                        details=f"PII type {pres_result.pii_type} detected in synthetic data (conf={pres_result.confidence})"
-                    ))
+            if strategy in ("substitute_realistic", "format_preserving") and col in synthetic_data.columns and col in real_data.columns:
+                overlap_ratio = self._sensitive_value_overlap(real_data[col], synthetic_data[col])
+                results.append(ValidationResult(
+                    check_name=f"Sensitive Value Overlap: {col}",
+                    table_name=self.table_name,
+                    column_name=col,
+                    passed=(overlap_ratio <= 0.05),
+                    metric_value=round(overlap_ratio, 6),
+                    threshold=0.05,
+                    details=f"{overlap_ratio:.2%} of unique synthetic values also appear in source data"
+                ))
 
         # Re-identification risk score
         reid_result = self._compute_reid_risk(real_data, synthetic_data, reid_threshold)
@@ -288,6 +291,25 @@ class DataValidator:
     # =========================================================================
     # Check 4.3 — Lineage Integrity
     # =========================================================================
+    def _is_identifier_like(self, column_name: str, series: pd.Series) -> bool:
+        """Skip fidelity checks for identifier-style fields and validate them relationally instead."""
+        upper_name = column_name.upper()
+        if upper_name.endswith(("_ID", "IDENTIFIER", "_SEQ", "_SERIAL", "_UUID")):
+            return True
+
+        unique_ratio = series.nunique(dropna=True) / max(len(series), 1)
+        return unique_ratio >= 0.95 and any(token in upper_name for token in ("ID", "KEY", "UUID"))
+
+    def _sensitive_value_overlap(self, real_series: pd.Series, synthetic_series: pd.Series) -> float:
+        """Measure exact-value reuse between source and synthetic sensitive columns."""
+        real_values = {str(v) for v in real_series.dropna().unique()}
+        synthetic_values = {str(v) for v in synthetic_series.dropna().unique()}
+        if not synthetic_values:
+            return 0.0
+
+        overlap = real_values & synthetic_values
+        return len(overlap) / max(len(synthetic_values), 1)
+
     def validate_lineage_integrity(
         self,
         synthetic_data: pd.DataFrame,

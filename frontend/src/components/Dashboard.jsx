@@ -1,7 +1,10 @@
 import React, { useState, useEffect, useCallback } from 'react';
 import axios from 'axios';
-import { Play, Activity, Database, ShieldAlert, CheckCircle, Clock, RefreshCw, X, FileText, BarChart3, Network } from 'lucide-react';
+import { Play, Activity, Database, ShieldAlert, CheckCircle, Clock, RefreshCw, X, FileText, BarChart3, Network, Cpu, Table2, Brain } from 'lucide-react';
 import GraphView from './GraphView';
+import GenerationLog from './GenerationLog';
+import DataViewer from './DataViewer';
+import ReasoningPanel from './ReasoningPanel';
 
 const API_BASE = "http://localhost:8000/api";
 
@@ -14,6 +17,9 @@ const Dashboard = () => {
   const [policies, setPolicies] = useState([]);
   const [showPolicies, setShowPolicies] = useState(false);
   const [showGraph, setShowGraph] = useState(false);
+  const [showGenLog, setShowGenLog] = useState(false);
+  const [showDataViewer, setShowDataViewer] = useState(false);
+  const [showReasoning, setShowReasoning] = useState(false);
   const [correctionModal, setCorrectionModal] = useState(null);
   const [correctionData, setCorrectionData] = useState('');
   const [abbreviationModal, setAbbreviationModal] = useState(null);
@@ -141,20 +147,41 @@ const Dashboard = () => {
           </h1>
           <p className="text-gray-400 mt-2">Telecom Enterprise — Semantic Graph & SDV Integration</p>
         </div>
-        <div className="flex gap-3">
+        <div className="flex gap-2 flex-wrap">
           <button
             onClick={() => setShowGraph(true)}
-            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded-lg font-semibold transition-all"
+            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
           >
-            <Network size={18} />
-            View Graph
+            <Network size={16} />
+            Graph
+          </button>
+          <button
+            onClick={() => setShowReasoning(true)}
+            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
+          >
+            <Brain size={16} />
+            LLM Reasoning
+          </button>
+          <button
+            onClick={() => setShowGenLog(true)}
+            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
+          >
+            <Cpu size={16} />
+            Generation Tiers
+          </button>
+          <button
+            onClick={() => setShowDataViewer(true)}
+            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
+          >
+            <Table2 size={16} />
+            View Data
           </button>
           <button
             onClick={fetchPolicies}
-            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-4 py-3 rounded-lg font-semibold transition-all"
+            className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
           >
-            <FileText size={18} />
-            View Policies
+            <FileText size={16} />
+            Policies
           </button>
           <button
             onClick={startPipeline}
@@ -391,6 +418,15 @@ const Dashboard = () => {
 
       {/* Knowledge Graph View */}
       {showGraph && <GraphView onClose={() => setShowGraph(false)} />}
+
+      {/* Generation Tier View */}
+      {showGenLog && <GenerationLog onClose={() => setShowGenLog(false)} />}
+
+      {/* Data Viewer */}
+      {showDataViewer && <DataViewer onClose={() => setShowDataViewer(false)} />}
+
+      {/* LLM Reasoning Panel */}
+      {showReasoning && <ReasoningPanel onClose={() => setShowReasoning(false)} />}
 
       {/* Abbreviation Modal */}
       {abbreviationModal && (

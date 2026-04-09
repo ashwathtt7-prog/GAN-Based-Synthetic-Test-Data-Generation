@@ -7,8 +7,14 @@ import json
 import logging
 import threading
 from datetime import datetime
+from pathlib import Path
+
+import pandas as pd
 from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
+from sqlalchemy import create_engine, inspect as sqlalchemy_inspect
+
+from config.config import load_config
 
 from db.client import DatabaseClient
 import db.schema as db_models
@@ -276,10 +282,14 @@ def get_all_policies():
             "column_name": p.column_name,
             "pii_classification": p.pii_classification,
             "pii_source": p.pii_source,
+            "sensitivity_reason": p.sensitivity_reason,
             "masking_strategy": p.masking_strategy,
+            "constraint_profile": p.constraint_profile,
             "business_importance": p.business_importance,
+            "edge_case_flags": p.edge_case_flags,
             "llm_confidence": p.llm_confidence,
             "dedup_mode": p.dedup_mode,
+            "notes": p.notes,
         } for p in policies]
 
 
@@ -296,6 +306,263 @@ def get_all_strategies():
             "temporal_constraints": s.temporal_constraints,
             "edge_case_injection_pct": s.edge_case_injection_pct,
         } for s in strategies]
+
+
+# =====================================================
+# Generation Run Log & Synthetic Data Preview
+# =====================================================
+
+def _get_output_root() -> Path:
+    config = load_config()
+    return Path(config.get("delivery", {}).get("output_directory", "output/synthetic"))
+
+
+def _list_run_manifests() -> list[dict]:
+    output_root = _get_output_root()
+    if not output_root.exists():
+        return []
+
+    manifests = []
+    run_dirs = sorted(
+        [d for d in output_root.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        manifest_path = run_dir / "manifest.json"
+        if not manifest_path.exists():
+            continue
+        try:
+            manifest = json.loads(manifest_path.read_text())
+            manifests.append({"run_dir": run_dir, "manifest": manifest})
+        except Exception as exc:
+            logger.warning(f"Failed to parse manifest {manifest_path}: {exc}")
+    return manifests
+
+
+def _read_generated_dataset(table_name: str, run_id: str | None = None):
+    manifests = _list_run_manifests()
+    if run_id:
+        manifests = [m for m in manifests if m["run_dir"].name == run_id]
+
+    for item in manifests:
+        run_dir = item["run_dir"]
+        parquet_file = run_dir / f"{table_name}.parquet"
+        csv_file = run_dir / f"{table_name}.csv"
+
+        try:
+            if parquet_file.exists():
+                return run_dir.name, pd.read_parquet(parquet_file)
+            if csv_file.exists():
+                return run_dir.name, pd.read_csv(csv_file)
+        except Exception as exc:
+            logger.warning(f"Failed to read generated data for {table_name} from {run_dir}: {exc}")
+
+    return None, None
+
+
+def _get_source_engine():
+    config = load_config()
+    source_url = config["data_sources"][0]["connection_string"]
+    return create_engine(source_url)
+
+
+def _get_source_table_names() -> list[str]:
+    try:
+        engine = _get_source_engine()
+        return sorted(sqlalchemy_inspect(engine).get_table_names())
+    except Exception as exc:
+        logger.warning(f"Failed to inspect source database tables: {exc}")
+        return []
+
+
+def _build_manifest_generation_entries() -> list[dict]:
+    entries = []
+    for item in _list_run_manifests():
+        run_dir = item["run_dir"]
+        manifest = item["manifest"]
+        row_counts = manifest.get("row_counts", {})
+        strategies = manifest.get("generation_strategies", {})
+        for table_name in manifest.get("tables_generated", []):
+            entries.append({
+                "run_id": manifest.get("run_id", run_dir.name),
+                "table_name": table_name,
+                "tier": strategies.get(table_name, "unknown"),
+                "rows_generated": row_counts.get(table_name, 0),
+                "domain": "unknown",
+                "status": "completed",
+                "started_at": None,
+                "completed_at": manifest.get("timestamp"),
+            })
+    return entries
+
+@app.get("/api/generation/log")
+def get_generation_log():
+    """
+    Return tier routing history for generated tables.
+    Prefers live step logs and falls back to delivery manifests for older runs.
+    """
+    with db_client.session() as session:
+        strategies = session.query(db_models.GenerationStrategy).all()
+        step_logs = session.query(db_models.PipelineStepLog).filter(
+            db_models.PipelineStepLog.step_name.in_(["tier_routing", "generation_complete"])
+        ).order_by(db_models.PipelineStepLog.started_at.desc()).all()
+        pipeline_runs = session.query(db_models.PipelineRun).all()
+
+        tier_map = {s.table_name: s.tier_override or "auto" for s in strategies}
+        domain_map = {s.table_name: s.domain for s in strategies}
+        run_map = {r.run_id: r for r in pipeline_runs}
+
+        entries = {}
+        for step in reversed(step_logs):
+            if not step.table_name:
+                continue
+            key = (step.run_id, step.table_name)
+            run = run_map.get(step.run_id)
+            entry = entries.get(key, {
+                "run_id": step.run_id,
+                "table_name": step.table_name,
+                "tier": tier_map.get(step.table_name, "unknown"),
+                "rows_generated": 0,
+                "domain": step.domain or domain_map.get(step.table_name, "unknown"),
+                "status": run.status if run else step.status,
+                "started_at": run.started_at.isoformat() if run and run.started_at else None,
+                "completed_at": run.ended_at.isoformat() if run and run.ended_at else None,
+            })
+
+            details = step.details or {}
+            if step.step_name == "tier_routing":
+                entry["tier"] = details.get("tier", entry["tier"])
+                entry["rows_generated"] = entry["rows_generated"] or details.get("row_count", 0)
+            elif step.step_name == "generation_complete":
+                entry["tier"] = details.get("tier", entry["tier"])
+                entry["rows_generated"] = details.get("rows_generated", entry["rows_generated"])
+                entry["completed_at"] = step.completed_at.isoformat() if step.completed_at else entry["completed_at"]
+
+            entries[key] = entry
+
+    for item in _build_manifest_generation_entries():
+        key = (item["run_id"], item["table_name"])
+        existing = entries.get(key)
+        if not existing:
+            item["domain"] = domain_map.get(item["table_name"], "unknown")
+            entries[key] = item
+            continue
+        if existing.get("tier") in (None, "unknown", "auto"):
+            existing["tier"] = item["tier"]
+        if not existing.get("rows_generated"):
+            existing["rows_generated"] = item["rows_generated"]
+        if not existing.get("completed_at"):
+            existing["completed_at"] = item["completed_at"]
+
+    return sorted(
+        entries.values(),
+        key=lambda item: (
+            item.get("completed_at") or item.get("started_at") or "",
+            item["run_id"],
+            item["table_name"],
+        ),
+        reverse=True,
+    )
+
+
+@app.get("/api/data/tables")
+def get_data_tables():
+    """Return all source tables plus generated-data availability for the viewer."""
+    source_tables = _get_source_table_names()
+    manifest_entries = _build_manifest_generation_entries()
+    latest_generated = {}
+    for entry in manifest_entries:
+        latest_generated.setdefault(entry["table_name"], entry)
+
+    with db_client.session() as session:
+        table_meta = session.query(db_models.TableMetadataRecord).all()
+        meta_map = {t.table_name: t for t in table_meta}
+
+    all_tables = sorted(set(source_tables) | set(latest_generated.keys()) | set(meta_map.keys()))
+    return [{
+        "table_name": table_name,
+        "domain": getattr(meta_map.get(table_name), "domain", None) or latest_generated.get(table_name, {}).get("domain", "unknown"),
+        "source_row_count": getattr(meta_map.get(table_name), "row_count", None),
+        "generated_row_count": latest_generated.get(table_name, {}).get("rows_generated"),
+        "generated_run_id": latest_generated.get(table_name, {}).get("run_id"),
+        "has_source": table_name in source_tables or table_name in meta_map,
+        "has_generated": table_name in latest_generated,
+        "tier": latest_generated.get(table_name, {}).get("tier"),
+    } for table_name in all_tables]
+
+
+@app.get("/api/generated-data/{table_name}")
+def get_generated_data(table_name: str, run_id: str | None = None):
+    """
+    Return up to 50 sample rows of generated synthetic data for a given table.
+    Reads from the most recent run's output parquet/csv file.
+    """
+    resolved_run_id, df = _read_generated_dataset(table_name, run_id=run_id)
+    if df is None:
+        return {
+            "table_name": table_name,
+            "rows": [],
+            "message": f"No generated data found for table '{table_name}'.",
+        }
+
+    rows = df.head(50).to_dict(orient="records")
+    return {
+        "table_name": table_name,
+        "run_id": resolved_run_id,
+        "total_rows": len(df),
+        "sample_size": len(rows),
+        "columns": list(df.columns),
+        "rows": rows,
+    }
+
+
+@app.get("/api/source-data/{table_name}")
+def get_source_data(table_name: str):
+    """Return up to 50 sample rows of source data for comparison."""
+    try:
+        engine = _get_source_engine()
+        total_rows = pd.read_sql(f'SELECT COUNT(*) AS total_rows FROM "{table_name}"', engine).iloc[0]["total_rows"]
+        df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT 50', engine)
+        rows = df.head(50).to_dict(orient="records")
+        return {
+            "table_name": table_name,
+            "total_rows": int(total_rows),
+            "sample_size": len(rows),
+            "columns": list(df.columns),
+            "rows": rows,
+        }
+    except Exception as e:
+        return {"table_name": table_name, "rows": [], "message": str(e)}
+
+
+# =====================================================
+# Pipeline Activity Log
+# =====================================================
+
+@app.get("/api/pipeline/activity-log")
+def get_pipeline_activity_log():
+    """
+    Return step-by-step activity log from the pipeline.
+    Reads from the pipeline_step_log table.
+    """
+    with db_client.session() as session:
+        steps = session.query(db_models.PipelineStepLog).order_by(
+            db_models.PipelineStepLog.started_at.desc()
+        ).limit(200).all()
+
+        return [{
+            "id": s.id,
+            "run_id": s.run_id,
+            "step_name": s.step_name,
+            "domain": s.domain,
+            "table_name": s.table_name,
+            "status": s.status,
+            "details": s.details,
+            "started_at": s.started_at.isoformat() if s.started_at else None,
+            "completed_at": s.completed_at.isoformat() if s.completed_at else None,
+            "duration_seconds": s.duration_seconds,
+        } for s in steps]
 
 
 # =====================================================

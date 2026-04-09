@@ -63,8 +63,18 @@ class RuleBasedGenerator:
         if len(non_null) == 0:
             return [None] * n
 
+        # Try to coerce object columns that are actually numeric
+        is_numeric = pd.api.types.is_numeric_dtype(non_null)
+        if not is_numeric and non_null.dtype == object:
+            try:
+                non_null = pd.to_numeric(non_null, errors='coerce').dropna()
+                if len(non_null) > 0:
+                    is_numeric = True
+            except Exception:
+                pass
+
         # Numeric column
-        if pd.api.types.is_numeric_dtype(non_null):
+        if is_numeric:
             min_val = constraint.get("min", float(non_null.min()))
             max_val = constraint.get("max", float(non_null.max()))
             mean_val = float(non_null.mean())

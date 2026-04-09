@@ -89,6 +89,26 @@ class PipelineOrchestrator:
                     run.ended_at = datetime.utcnow()
                 session.commit()
 
+    def _log_step(self, step_name: str, table_name: str = None, domain: str = None,
+                  status: str = "completed", details: dict = None, duration: float = None):
+        """Log a pipeline step to the step log for frontend visibility."""
+        try:
+            with self.db_client.session() as session:
+                log = db_models.PipelineStepLog(
+                    run_id=self.run_id,
+                    step_name=step_name,
+                    table_name=table_name,
+                    domain=domain,
+                    status=status,
+                    details=details or {},
+                    duration_seconds=duration,
+                    completed_at=datetime.utcnow() if status in ("completed", "failed") else None,
+                )
+                session.add(log)
+                session.commit()
+        except Exception as e:
+            logger.debug(f"Failed to log step {step_name}: {e}")
+
     def execute_pipeline(self, run_id: str, table_filter: list[str] = None):
         """
         Execute the full 4-layer pipeline.
@@ -107,6 +127,7 @@ class PipelineOrchestrator:
             self._update_status("Schema Ingestion", 2.0)
             logger.info("=== Phase 1: Schema Ingestion ===")
 
+            self._log_step("schema_ingestion", status="running", details={"phase": "starting"})
             source_url = self.config['data_sources'][0]['connection_string']
             connector = SchemaConnector(source_url)
             tables = connector.extract_schema()
@@ -121,6 +142,8 @@ class PipelineOrchestrator:
 
             all_rels = explicit_rels + implicit_rels
             logger.info(f"Extracted {len(tables)} tables, {len(all_rels)} relationships")
+            self._log_step("schema_ingestion", status="completed",
+                          details={"tables": len(tables), "relationships": len(all_rels)})
 
             # Apply table filter if provided (for small-table testing)
             if table_filter:
@@ -139,6 +162,8 @@ class PipelineOrchestrator:
 
             kg = get_knowledge_graph()
             kg.build_graph(tables, all_rels)
+            self._log_step("knowledge_graph_build", status="completed",
+                          details={"tables": len(tables), "relationships": len(all_rels)})
 
             # ================================================================
             # Phase 3: Domain Partitioning (Louvain on knowledge graph)
@@ -152,6 +177,8 @@ class PipelineOrchestrator:
                 logger.warning(f"Louvain partitioning failed, using heuristic: {e}")
                 domain_map = {}
 
+            self._log_step("domain_partitioning", status="completed",
+                          details={"domains": list(set(domain_map.values())) if domain_map else []})
             # Fallback heuristic domain assignment if partitioning returned empty
             if not domain_map:
                 for t in tables:
@@ -238,6 +265,9 @@ class PipelineOrchestrator:
                         # Save with pii_source = "presidio"
                         self._save_column_policy(policy, pii_source="presidio")
                         table_policies.append(policy)
+                        self._log_step("pii_detection", table_name=table.table_name, status="completed",
+                                      details={"column": col.column_name, "source": "presidio",
+                                               "pii_type": pres_result.pii_type, "masking": masking_strategy})
                         continue
 
                     # Step 2.4: LLM Semantic Reasoning (for non-PII or uncertain columns)
@@ -266,6 +296,10 @@ class PipelineOrchestrator:
 
                     self._save_column_policy(policy, pii_source="llm")
                     table_policies.append(policy)
+                    self._log_step("llm_reasoning", table_name=table.table_name, status="completed",
+                                  details={"column": col.column_name, "pii": policy.pii_classification,
+                                           "masking": policy.masking_strategy, "confidence": policy.llm_confidence,
+                                           "reason": (policy.sensitivity_reason or "")[:200]})
 
                 # Step 2.6: Generation Strategy
                 domain = domain_map.get(table.table_name, "unknown")
@@ -300,6 +334,7 @@ class PipelineOrchestrator:
 
                 policies = self.column_policies_cache.get(table_name, [])
                 strategy = self.strategies_cache.get(table_name)
+                domain = domain_map.get(table_name, "unknown")
 
                 if not policies:
                     logger.warning(f"No policies for {table_name}, skipping generation")
@@ -327,12 +362,15 @@ class PipelineOrchestrator:
                     )
                     tier = "rule_based"
 
+                self._log_step("tier_routing", table_name=table_name, domain=domain, status="completed",
+                              details={"tier": tier, "row_count": len(source_df),
+                                       "tier_override": tier_override, "smoke_test": smoke_test_mode})
+
                 # Step 3.2: Pre-generation masking
                 masked_df = masking_engine.mask_dataframe(source_df, policies)
 
                 # Step 3.3: Train and generate
                 num_rows = len(source_df)
-                domain = domain_map.get(table_name, "unknown")
 
                 # POC: cap epochs low to avoid blocking — production would use more
                 poc_ctgan_epochs = min(ctgan_epochs, 15)
@@ -372,6 +410,9 @@ class PipelineOrchestrator:
                         logger.error(f"Fallback generation also failed for {table_name}: {e2}")
                         continue
 
+                synthetic_df = self._stitch_foreign_keys(table_name, synthetic_df, all_rels)
+                synthetic_df = self._enforce_temporal_constraints(synthetic_df, strategy)
+
                 # Step 3.5: Boundary Key Registry
                 self._update_boundary_keys(table_name, domain, synthetic_df, all_rels)
 
@@ -388,8 +429,23 @@ class PipelineOrchestrator:
                     table_name, synthetic_df, dominant_dedup, fk_cols, self.run_id
                 )
 
+                # Coerce mixed-type object columns to match source dtypes
+                for col in synthetic_df.columns:
+                    if col in source_df.columns:
+                        try:
+                            if pd.api.types.is_numeric_dtype(source_df[col]):
+                                synthetic_df[col] = pd.to_numeric(synthetic_df[col], errors='coerce')
+                            elif pd.api.types.is_datetime64_any_dtype(source_df[col]):
+                                synthetic_df[col] = pd.to_datetime(synthetic_df[col], errors='coerce')
+                        except Exception:
+                            pass
+
                 self.generated_data[table_name] = synthetic_df
+                self._append_completed_table(table_name)
                 logger.info(f"Generated {len(synthetic_df)} records for {table_name}")
+                self._log_step("generation_complete", table_name=table_name, domain=domain, status="completed",
+                              details={"tier": tier, "rows_generated": len(synthetic_df),
+                                       "columns": len(synthetic_df.columns)})
 
             # ================================================================
             # Phase 6: Validation Gate (Layer 4)
@@ -418,6 +474,7 @@ class PipelineOrchestrator:
                     real_df = pd.read_sql(f"SELECT * FROM {table_name}", connector.engine)
                     real_masked = masking_engine.mask_dataframe(real_df, policies)
                 except Exception:
+                    real_df = pd.DataFrame()
                     real_masked = pd.DataFrame()
 
                 results = []
@@ -433,7 +490,7 @@ class PipelineOrchestrator:
 
                 # Check 4.2: PII Leakage
                 pii_results = validator.validate_pii_leakage(
-                    synthetic_df, real_masked if len(real_masked) > 0 else synthetic_df,
+                    synthetic_df, real_df if len(real_df) > 0 else synthetic_df,
                     policies, presidio,
                     reid_threshold=validation_cfg.get('reid_risk_threshold', 0.85)
                 )
@@ -457,11 +514,16 @@ class PipelineOrchestrator:
 
                 # Check for failures
                 failures = [r for r in results if not r.passed]
+                passed_count = len(results) - len(failures)
                 if failures:
                     logger.warning(f"Validation failures for {table_name}: {len(failures)}")
                     tables_needing_retry.append(table_name)
                 else:
                     logger.info(f"All validations passed for {table_name}")
+                self._log_step("validation", table_name=table_name, status="completed",
+                              details={"total_checks": len(results), "passed": passed_count,
+                                       "failed": len(failures),
+                                       "failures": [f.check_name for f in failures][:10]})
 
             # Retry loop for failed tables
             for retry in range(max_retries):
@@ -529,12 +591,17 @@ class PipelineOrchestrator:
                     status="completed",
                     domains_completed=domains_list,
                     domains_pending=[],
+                    tables_completed=list(self.generated_data.keys()),
                     validation_results={
                         t: [r.model_dump() for r in rs]
                         for t, rs in all_validation_results.items()
                     },
                     completed_at=datetime.utcnow()
                 )
+
+            self._log_step("delivery", status="completed",
+                          details={"output_path": str(manifest.output_path),
+                                   "tables_delivered": list(self.generated_data.keys())})
 
             self._update_status("Completed", 100.0, "completed")
             logger.info(f"Pipeline completed. Manifest: {manifest.output_path}")
@@ -548,7 +615,7 @@ class PipelineOrchestrator:
                 self.db_client.update_run_log(
                     session, self.run_id,
                     status="failed",
-                    domains_completed=list(self.generated_data.keys()),
+                    tables_completed=list(self.generated_data.keys()),
                     completed_at=datetime.utcnow()
                 )
 
@@ -578,6 +645,18 @@ class PipelineOrchestrator:
         """Upsert generation strategy to operational DB."""
         with self.db_client.session() as session:
             self.db_client.upsert_generation_strategy(session, strategy.model_dump())
+
+    def _append_completed_table(self, table_name: str):
+        """Persist generated tables so the dashboard can surface them immediately."""
+        with self.db_client.session() as session:
+            run_log = session.query(db_models.GenerationRunLog).filter_by(run_id=self.run_id).first()
+            if not run_log:
+                return
+
+            completed_tables = list(run_log.tables_completed or [])
+            if table_name not in completed_tables:
+                completed_tables.append(table_name)
+                run_log.tables_completed = completed_tables
 
     def _queue_for_review(self, table_name: str, column_name: str, policy, reason: str):
         """Add a column to the human review queue."""
@@ -634,6 +713,70 @@ class PipelineOrchestrator:
         if not modes:
             return "reference"
         return max(modes, key=modes.get)
+
+    def _stitch_foreign_keys(self, table_name: str, synthetic_df: pd.DataFrame, relationships: list) -> pd.DataFrame:
+        """Align child FK columns to already generated parent tables."""
+        stitched_df = synthetic_df.copy()
+
+        for rel in relationships:
+            if rel.source_table.upper() != table_name.upper():
+                continue
+
+            fk_col = rel.source_column
+            parent_table = rel.target_table
+            parent_col = rel.target_column
+            parent_df = self.generated_data.get(parent_table)
+
+            if (
+                fk_col not in stitched_df.columns
+                or parent_df is None
+                or parent_col not in parent_df.columns
+            ):
+                continue
+
+            parent_values = parent_df[parent_col].dropna().tolist()
+            if not parent_values:
+                continue
+
+            null_mask = stitched_df[fk_col].isna() if fk_col in stitched_df.columns else None
+            replacement = pd.Series(parent_values).sample(
+                n=len(stitched_df),
+                replace=True,
+                random_state=42,
+            ).reset_index(drop=True)
+            stitched_df[fk_col] = replacement
+
+            if null_mask is not None and null_mask.any():
+                stitched_df.loc[null_mask, fk_col] = None
+
+        return stitched_df
+
+    def _enforce_temporal_constraints(self, synthetic_df: pd.DataFrame, strategy) -> pd.DataFrame:
+        """Repair simple earlier/later temporal violations before validation."""
+        if not strategy or not getattr(strategy, "temporal_constraints", None):
+            return synthetic_df
+
+        adjusted_df = synthetic_df.copy()
+        for constraint in strategy.temporal_constraints:
+            earlier_col = constraint.get("earlier_column")
+            later_col = constraint.get("later_column")
+            if earlier_col not in adjusted_df.columns or later_col not in adjusted_df.columns:
+                continue
+
+            earlier_dt = pd.to_datetime(adjusted_df[earlier_col], errors="coerce")
+            later_dt = pd.to_datetime(adjusted_df[later_col], errors="coerce")
+            comparable = earlier_dt.notna() & later_dt.notna()
+            violations = comparable & (earlier_dt > later_dt)
+
+            if not violations.any():
+                continue
+
+            earlier_vals = earlier_dt.loc[violations]
+            later_vals = later_dt.loc[violations]
+            adjusted_df.loc[violations, earlier_col] = earlier_vals.combine(later_vals, min)
+            adjusted_df.loc[violations, later_col] = earlier_vals.combine(later_vals, max)
+
+        return adjusted_df
 
     def _topological_sort(self, tables, relationships) -> list:
         """Sort tables so parent tables are generated before child tables."""
