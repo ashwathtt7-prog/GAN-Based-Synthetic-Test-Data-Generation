@@ -8,6 +8,7 @@ from pathlib import Path
 from contextlib import contextmanager
 from sqlalchemy import create_engine, event
 from sqlalchemy.orm import sessionmaker, Session
+from datetime import datetime
 from db.schema import Base
 
 
@@ -84,6 +85,7 @@ class DatabaseClient:
     def initialize(self):
         """Create all tables."""
         init_db(self.engine)
+        self.mark_incomplete_runs_failed()
 
     @contextmanager
     def session(self):
@@ -100,6 +102,27 @@ class DatabaseClient:
 
     # Alias for backward compatibility
     get_session = session
+
+    def mark_incomplete_runs_failed(self):
+        """Mark stale in-progress runs as failed when the app starts fresh."""
+        from db.schema import PipelineRun, GenerationRunLog
+
+        with self.session() as session:
+            now = datetime.utcnow()
+            stale_runs = session.query(PipelineRun).filter(
+                PipelineRun.status.in_(["initialized", "running"])
+            ).all()
+            for run in stale_runs:
+                run.status = "failed"
+                run.current_step = (run.current_step or "Unknown") + " (interrupted)"
+                run.ended_at = now
+
+            stale_logs = session.query(GenerationRunLog).filter(
+                GenerationRunLog.status == "running"
+            ).all()
+            for log in stale_logs:
+                log.status = "failed"
+                log.completed_at = now
 
     # === Column Policy Operations ===
     def upsert_column_policy(self, session: Session, policy_data: dict):

@@ -28,29 +28,35 @@ class DDLParser:
                 parsed = sqlglot.parse(content)
                 for statement in parsed:
                     if isinstance(statement, exp.Create):
-                        # Find the table name
-                        table_name = statement.this.name.upper()
+                        schema = statement.this if isinstance(statement.this, exp.Schema) else statement.find(exp.Schema)
+                        if not isinstance(schema, exp.Schema) or not isinstance(schema.this, exp.Table):
+                            continue
+
+                        table_name = schema.this.name.upper()
                         
                         # Look for foreign key constraints in table schema
-                        schema = statement.find(exp.Schema)
-                        if schema:
-                            for expr in schema.expressions:
-                                # Foreign keys defined inline or as table constraints
-                                # In sqlglot representation, look for Reference or ForeignKey
-                                if isinstance(expr, exp.ForeignKey):
-                                    source_col = [col.name.upper() for col in expr.expressions][0]
-                                    target_table = expr.args.get('reference').this.name.upper()
-                                    target_col = [col.name.upper() for col in expr.args.get('reference').expressions][0]
-                                    
-                                    rel = RelationshipInfo(
-                                        source_table=table_name,
-                                        source_column=source_col,
-                                        target_table=target_table,
-                                        target_column=target_col,
-                                        relationship_type="FK_DECLARED",
-                                        confidence=1.0 # High confidence as it's explicitly declared
-                                    )
-                                    relationships.append(rel)
+                        for expr in schema.expressions:
+                            if not isinstance(expr, exp.ForeignKey):
+                                continue
+
+                            reference = expr.args.get("reference")
+                            target_schema = reference.this if reference else None
+                            if not isinstance(target_schema, exp.Schema) or not isinstance(target_schema.this, exp.Table):
+                                continue
+
+                            source_cols = [col.name.upper() for col in expr.expressions if hasattr(col, "name")]
+                            target_cols = [col.name.upper() for col in target_schema.expressions if hasattr(col, "name")]
+
+                            for source_col, target_col in zip(source_cols, target_cols):
+                                rel = RelationshipInfo(
+                                    source_table=table_name,
+                                    source_column=source_col,
+                                    target_table=target_schema.this.name.upper(),
+                                    target_column=target_col,
+                                    relationship_type="FK_DECLARED",
+                                    confidence=1.0
+                                )
+                                relationships.append(rel)
                                     
             except Exception as e:
                 logger.error(f"Error parsing DDL file {sql_file.name}: {e}")

@@ -83,6 +83,8 @@ class KnowledgeGraph:
             tables: list of TableMetadata pydantic models
             relationships: list of RelationshipInfo pydantic models
         """
+        self.G.clear()
+
         # Add table nodes
         for table in tables:
             table_id = f"table:{table.table_name}"

@@ -15,7 +15,10 @@ class TierRouter:
         self.config = config or load_config()
         gen_cfg = self.config.get("generation", {})
         thresholds = gen_cfg.get("row_count_thresholds", {})
-        self.ctgan_min = thresholds.get("ctgan_min", 2000)
+        configured_ctgan_min = thresholds.get("ctgan_min", 2000)
+        # Keep medium-sized POC tables on TVAE to avoid very slow CTGAN runs on
+        # high-cardinality schemas during local end-to-end execution.
+        self.ctgan_min = max(configured_ctgan_min, 5000)
         self.tvae_min = thresholds.get("tvae_min", 200)
 
     def route(self, table_name: str, row_count: int, tier_override: str = None) -> str:

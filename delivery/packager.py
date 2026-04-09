@@ -5,6 +5,7 @@ and packages for PLE delivery.
 """
 
 import gzip
+import importlib.util
 import json
 import logging
 import os
@@ -54,12 +55,20 @@ class DeliveryPackager:
         run_dir.mkdir(parents=True, exist_ok=True)
 
         row_counts = {}
+        actual_output_format = self.output_format
+        parquet_available = self.output_format != "parquet" or self._parquet_engine_available()
+        if self.output_format == "parquet" and not parquet_available:
+            actual_output_format = "csv"
+            logger.warning(
+                "[Delivery] Parquet engine not available. Falling back to CSV export for run %s.",
+                run_id,
+            )
 
         for table_name, df in synthetic_datasets.items():
             # Remove internal metadata columns
             export_df = df.drop(columns=['_edge_case'], errors='ignore')
 
-            if self.output_format == "parquet":
+            if actual_output_format == "parquet":
                 path = run_dir / f"{table_name}.parquet"
                 export_df.to_parquet(path, index=False)
             else:
@@ -87,7 +96,7 @@ class DeliveryPackager:
             generation_strategies=generation_strategies,
             domains=domains,
             timestamp=datetime.utcnow().isoformat(),
-            output_format=self.output_format,
+            output_format=actual_output_format,
             output_path=str(run_dir)
         )
 
@@ -110,3 +119,10 @@ class DeliveryPackager:
             logger.info(f"[Delivery] Compressed archive: {archive_path}")
 
         return manifest
+
+    def _parquet_engine_available(self) -> bool:
+        """Return True when pandas has an installed parquet backend to use."""
+        return any(
+            importlib.util.find_spec(engine) is not None
+            for engine in ("pyarrow", "fastparquet")
+        )

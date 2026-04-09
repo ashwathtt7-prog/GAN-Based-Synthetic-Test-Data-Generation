@@ -85,6 +85,8 @@ class PipelineOrchestrator:
                 run.current_step = step
                 run.progress_pct = progress
                 run.status = status
+                if status in {"completed", "failed", "cancelled"}:
+                    run.ended_at = datetime.utcnow()
                 session.commit()
 
     def execute_pipeline(self, run_id: str, table_filter: list[str] = None):
@@ -98,6 +100,7 @@ class PipelineOrchestrator:
         """
         self.run_id = run_id
         try:
+            smoke_test_mode = bool(table_filter)
             # ================================================================
             # Phase 1: Schema Ingestion (Step 1.1 - 1.3)
             # ================================================================
@@ -316,6 +319,13 @@ class PipelineOrchestrator:
                 # Step 3.1: Tier routing
                 tier_override = strategy.tier_override if strategy else None
                 tier = tier_router.route(table_name, len(source_df), tier_override)
+                if smoke_test_mode and tier != "rule_based":
+                    logger.info(
+                        "Smoke test mode active for filtered run. Overriding %s tier to rule_based for %s.",
+                        tier,
+                        table_name,
+                    )
+                    tier = "rule_based"
 
                 # Step 3.2: Pre-generation masking
                 masked_df = masking_engine.mask_dataframe(source_df, policies)
@@ -389,6 +399,8 @@ class PipelineOrchestrator:
 
             validation_cfg = self.config.get('validation', {})
             max_retries = validation_cfg.get('max_retry_on_failure', 3)
+            if smoke_test_mode:
+                max_retries = 0
             diagnosis_agent = FailureDiagnosisAgent()
 
             all_validation_results = {}

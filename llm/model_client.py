@@ -13,11 +13,13 @@ from typing import Type, Optional
 from pydantic import BaseModel
 
 logger = logging.getLogger(__name__)
+REPO_ROOT = Path(__file__).resolve().parent.parent
+CONFIG_DIR = REPO_ROOT / "config"
 
 
 def load_config() -> dict:
     """Load configuration from config.yaml."""
-    config_path = Path(__file__).parent.parent / "config" / "config.yaml"
+    config_path = CONFIG_DIR / "config.yaml"
     with open(config_path, "r") as f:
         return yaml.safe_load(f)
 
@@ -58,18 +60,29 @@ class ModelClient:
         # Load service account credentials
         sa_path = self.llm_config.get("service_account_path")
         if sa_path:
-            sa_full_path = Path(__file__).parent.parent / sa_path
-            if sa_full_path.exists():
+            sa_candidate = Path(sa_path)
+            search_paths = []
+            if sa_candidate.is_absolute():
+                search_paths.append(sa_candidate)
+            else:
+                search_paths.extend([
+                    CONFIG_DIR / sa_candidate,
+                    REPO_ROOT / sa_candidate,
+                    sa_candidate,
+                ])
+
+            sa_full_path = next((path.resolve() for path in search_paths if path.exists()), None)
+            if sa_full_path:
                 credentials = service_account.Credentials.from_service_account_file(
                     str(sa_full_path),
                     scopes=["https://www.googleapis.com/auth/generative-language",
                             "https://www.googleapis.com/auth/cloud-platform"]
                 )
                 genai.configure(credentials=credentials)
-                logger.info(f"Gemini initialized with service account: {sa_path}")
+                logger.info(f"Gemini initialized with service account: {sa_full_path}")
             else:
                 # Fall back to default credentials / API key
-                logger.warning(f"Service account not found at {sa_full_path}, using default auth")
+                logger.warning(f"Service account not found for path '{sa_path}', using default auth")
                 genai.configure()
         else:
             genai.configure()

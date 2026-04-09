@@ -5,7 +5,9 @@ Implements built-in and custom telecom recognizers.
 """
 
 import logging
+import spacy
 from presidio_analyzer import AnalyzerEngine, RecognizerRegistry, PatternRecognizer, Pattern
+from presidio_analyzer.nlp_engine import NlpEngineProvider
 from models.schemas import PresidioResult
 
 logger = logging.getLogger(__name__)
@@ -23,10 +25,47 @@ class PresidioScanner:
         # Add custom telecom recognizers
         self._add_custom_recognizers()
         
+        nlp_engine = self._build_nlp_engine()
         self.analyzer = AnalyzerEngine(
             registry=self.registry,
+            nlp_engine=nlp_engine,
             supported_languages=["en"]
         )
+
+    def _build_nlp_engine(self):
+        """
+        Build a Presidio NLP engine using the configured spaCy model, with a
+        local fallback to a smaller installed model to avoid runtime downloads.
+        """
+        configured_model = self.config.get("spacy_model", "en_core_web_lg")
+        fallback_models = [configured_model, "en_core_web_sm"]
+        chosen_model = None
+
+        for model_name in fallback_models:
+            if spacy.util.is_package(model_name):
+                chosen_model = model_name
+                break
+
+        if chosen_model is None:
+            raise RuntimeError(
+                "No compatible spaCy model is installed for Presidio. "
+                f"Tried: {', '.join(dict.fromkeys(fallback_models))}"
+            )
+
+        if chosen_model != configured_model:
+            logger.warning(
+                "Configured spaCy model '%s' is unavailable. Falling back to '%s'.",
+                configured_model,
+                chosen_model,
+            )
+
+        provider = NlpEngineProvider(
+            nlp_configuration={
+                "nlp_engine_name": "spacy",
+                "models": [{"lang_code": "en", "model_name": chosen_model}],
+            }
+        )
+        return provider.create_engine()
 
     def _add_custom_recognizers(self):
         """Build and register custom telecom pattern recognizers."""
