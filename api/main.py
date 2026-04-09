@@ -5,9 +5,14 @@ Hosts the REST API for the GUI Dashboard and exposes the Pipeline Orchestrator.
 
 import json
 import logging
+import math
+import os
 import threading
 from datetime import datetime
 from pathlib import Path
+
+for env_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
+    os.environ.setdefault(env_var, "1")
 
 import pandas as pd
 from fastapi import FastAPI, BackgroundTasks, HTTPException
@@ -198,6 +203,7 @@ def submit_abbreviation(item_id: int, submission: schemas.AbbreviationSubmission
 
 class PipelineStartRequest(schemas.BaseModel):
     table_filter: list[str] | None = None
+    fast_mode: bool = False
 
 @app.post("/api/pipeline/start")
 def start_pipeline(request: PipelineStartRequest = None):
@@ -206,10 +212,11 @@ def start_pipeline(request: PipelineStartRequest = None):
     Optional table_filter in request body: list of table names to process (for testing).
     """
     table_filter = request.table_filter if request else None
+    fast_mode = request.fast_mode if request else False
     run_id = orchestrator.initialize_run()
-    t = threading.Thread(target=orchestrator.execute_pipeline, args=(run_id, table_filter), daemon=True)
+    t = threading.Thread(target=orchestrator.execute_pipeline, args=(run_id, table_filter, fast_mode), daemon=True)
     t.start()
-    return {"message": "Pipeline started", "run_id": run_id, "table_filter": table_filter}
+    return {"message": "Pipeline started", "run_id": run_id, "table_filter": table_filter, "fast_mode": fast_mode}
 
 
 @app.post("/api/pipeline/resume/{run_id}")
@@ -361,6 +368,19 @@ def _read_generated_dataset(table_name: str, run_id: str | None = None):
     return None, None
 
 
+def _json_safe(value):
+    """Recursively normalize NaN/inf values so API responses remain JSON-safe."""
+    if isinstance(value, float):
+        if math.isnan(value) or math.isinf(value):
+            return None
+        return value
+    if isinstance(value, dict):
+        return {key: _json_safe(val) for key, val in value.items()}
+    if isinstance(value, list):
+        return [_json_safe(item) for item in value]
+    return value
+
+
 def _get_source_engine():
     config = load_config()
     source_url = config["data_sources"][0]["connection_string"]
@@ -395,6 +415,17 @@ def _build_manifest_generation_entries() -> list[dict]:
                 "completed_at": manifest.get("timestamp"),
             })
     return entries
+
+
+def _resolve_latest_run_id(session, requested_run_id: str | None = None) -> str | None:
+    """Resolve an explicit run id or fall back to the most recent pipeline run."""
+    if requested_run_id:
+        return requested_run_id
+
+    latest_run = session.query(db_models.PipelineRun).order_by(
+        db_models.PipelineRun.started_at.desc()
+    ).first()
+    return latest_run.run_id if latest_run else None
 
 @app.get("/api/generation/log")
 def get_generation_log():
@@ -464,6 +495,119 @@ def get_generation_log():
         ),
         reverse=True,
     )
+
+
+@app.get("/api/training-metrics")
+def get_training_metrics(run_id: str | None = None):
+    """Return live or historical model training metrics grouped by table."""
+    with db_client.session() as session:
+        resolved_run_id = _resolve_latest_run_id(session, run_id)
+        if not resolved_run_id:
+            return {"run_id": None, "tables": []}
+
+        steps = session.query(db_models.PipelineStepLog).filter(
+            db_models.PipelineStepLog.run_id == resolved_run_id,
+            db_models.PipelineStepLog.step_name.in_([
+                "table_profile",
+                "training_start",
+                "training_metric",
+                "training_complete",
+                "training_failed",
+                "model_reuse",
+                "generation_complete",
+                "generation_failed",
+            ]),
+        ).order_by(db_models.PipelineStepLog.started_at.asc(), db_models.PipelineStepLog.id.asc()).all()
+
+        tables = {}
+        for step in steps:
+            if not step.table_name:
+                continue
+
+            details = step.details or {}
+            entry = tables.setdefault(step.table_name, {
+                "table_name": step.table_name,
+                "domain": step.domain or "unknown",
+                "tier": None,
+                "status": "pending",
+                "model_type": None,
+                "model_reused": False,
+                "epochs_planned": None,
+                "epochs_completed": 0,
+                "metrics": [],
+                "profile": {},
+                "model_path": None,
+                "training_mode": None,
+                "match_type": None,
+                "error": None,
+            })
+
+            if step.step_name == "table_profile":
+                entry["profile"] = {
+                    "fingerprint": details.get("fingerprint"),
+                    "modeled_columns": details.get("modeled_columns", 0),
+                    "structural_columns": details.get("structural_columns", 0),
+                    "sensitive_columns": details.get("sensitive_columns", 0),
+                }
+            elif step.step_name == "training_start":
+                entry["status"] = "training"
+                entry["model_type"] = details.get("model_type")
+                entry["epochs_planned"] = details.get("epochs")
+                entry["training_mode"] = details.get("training_mode")
+                entry["match_type"] = details.get("match_type")
+            elif step.step_name == "training_metric":
+                entry["status"] = "training"
+                entry["model_type"] = details.get("model_type", entry["model_type"])
+                entry["metrics"].append(_json_safe(details))
+                entry["epochs_completed"] = max(entry["epochs_completed"], int(details.get("epoch", 0) or 0))
+            elif step.step_name == "training_complete":
+                entry["status"] = "completed"
+                entry["model_type"] = details.get("model_type", entry["model_type"])
+                entry["epochs_planned"] = details.get("epochs", entry["epochs_planned"])
+                entry["model_path"] = details.get("model_path")
+                entry["training_mode"] = details.get("training_mode", entry["training_mode"])
+                entry["match_type"] = details.get("match_type", entry["match_type"])
+            elif step.step_name == "training_failed":
+                entry["status"] = "failed"
+                entry["model_type"] = details.get("model_type", entry["model_type"])
+                entry["epochs_planned"] = details.get("epochs", entry["epochs_planned"])
+                entry["training_mode"] = details.get("training_mode", entry["training_mode"])
+                entry["match_type"] = details.get("match_type", entry["match_type"])
+                entry["error"] = details.get("error")
+            elif step.step_name == "model_reuse":
+                entry["status"] = "reused"
+                entry["model_type"] = details.get("model_type", entry["model_type"])
+                entry["model_reused"] = True
+                entry["model_path"] = details.get("model_path")
+                entry["match_type"] = details.get("match_type", entry["match_type"])
+                entry["profile"] = {
+                    **entry["profile"],
+                    "fingerprint": details.get("fingerprint", entry["profile"].get("fingerprint")),
+                }
+            elif step.step_name == "generation_complete":
+                entry["tier"] = details.get("tier", entry["tier"])
+                if entry["status"] == "pending":
+                    entry["status"] = "completed"
+                entry["model_reused"] = bool(details.get("model_reused", entry["model_reused"]))
+            elif step.step_name == "generation_failed":
+                entry["tier"] = details.get("tier", entry["tier"])
+                entry["status"] = "failed"
+                entry["error"] = details.get("error")
+
+        response_tables = []
+        for entry in tables.values():
+            metrics = entry["metrics"]
+            latest_metric = metrics[-1] if metrics else {}
+            response_tables.append({
+                **_json_safe(entry),
+                "latest_metric": _json_safe(latest_metric),
+                "metric_count": len(metrics),
+            })
+
+        return {
+            "run_id": resolved_run_id,
+            "tables": sorted(response_tables, key=lambda item: item["table_name"]),
+        }
 
 
 @app.get("/api/data/tables")

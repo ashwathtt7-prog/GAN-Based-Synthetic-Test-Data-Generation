@@ -2,7 +2,7 @@ import React, { useState, useEffect } from 'react';
 import axios from 'axios';
 import { X, Brain, Filter, ChevronDown, ChevronRight, Shield, Eye } from 'lucide-react';
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = "http://localhost:8001/api";
 
 const PII_COLORS = {
   none: 'bg-gray-700/50 text-gray-400',

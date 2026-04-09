@@ -63,10 +63,16 @@ class DedupEngine:
             hash_columns = [c for c in df.columns if c != '_edge_case']
 
         # Load existing hashes from registry
-        existing_hashes = set()
+        current_run_hashes = set()
+        known_hashes = set()
         with self.db_client.session() as session:
-            existing = session.query(DedupHashRegistry).filter_by(table_name=table_name).all()
-            existing_hashes = {r.record_hash for r in existing}
+            existing = session.query(DedupHashRegistry).filter_by(
+                table_name=table_name,
+                generation_run_id=run_id,
+            ).all()
+            current_run_hashes = {r.record_hash for r in existing}
+            known = session.query(DedupHashRegistry).filter_by(table_name=table_name).all()
+            known_hashes = {r.record_hash for r in known}
 
         # Compute hashes and filter duplicates
         hashes = []
@@ -75,7 +81,7 @@ class DedupEngine:
 
         for _, row in df.iterrows():
             h = self._hash_record(row, hash_columns)
-            if h in existing_hashes or h in new_hashes:
+            if h in current_run_hashes or h in new_hashes:
                 keep_mask.append(False)
             else:
                 keep_mask.append(True)
@@ -91,6 +97,8 @@ class DedupEngine:
         # Register new hashes
         with self.db_client.session() as session:
             for h in new_hashes:
+                if h in known_hashes:
+                    continue
                 entry = DedupHashRegistry(
                     table_name=table_name,
                     record_hash=h,

@@ -3,7 +3,7 @@ import ForceGraph2D from 'react-force-graph-2d';
 import axios from 'axios';
 import { X, ZoomIn, ZoomOut, Maximize2 } from 'lucide-react';
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = "http://localhost:8001/api";
 
 const DOMAIN_COLORS = {
   customer_management: '#3B82F6',  // blue

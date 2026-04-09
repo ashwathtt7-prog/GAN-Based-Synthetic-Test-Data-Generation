@@ -225,7 +225,12 @@ class DataValidator:
                         details=f"{invalid} values don't match expected format"
                     ))
 
-            if strategy in ("substitute_realistic", "format_preserving") and col in synthetic_data.columns and col in real_data.columns:
+            if (
+                strategy in ("substitute_realistic", "format_preserving")
+                and col in synthetic_data.columns
+                and col in real_data.columns
+                and self._should_run_sensitive_overlap(col, real_data[col], synthetic_data[col], policy)
+            ):
                 overlap_ratio = self._sensitive_value_overlap(real_data[col], synthetic_data[col])
                 results.append(ValidationResult(
                     check_name=f"Sensitive Value Overlap: {col}",
@@ -238,7 +243,7 @@ class DataValidator:
                 ))
 
         # Re-identification risk score
-        reid_result = self._compute_reid_risk(real_data, synthetic_data, reid_threshold)
+        reid_result = self._compute_reid_risk(real_data, synthetic_data, reid_threshold, column_policies)
         if reid_result:
             results.append(reid_result)
 
@@ -248,20 +253,29 @@ class DataValidator:
         self,
         real_data: pd.DataFrame,
         synthetic_data: pd.DataFrame,
-        threshold: float
+        threshold: float,
+        column_policies: list | None = None,
     ) -> ValidationResult:
         """
         Compute re-identification risk:
         For each synthetic record, measure similarity to nearest real record.
         """
-        # Use a subset for efficiency
-        common_cols = [c for c in real_data.columns if c in synthetic_data.columns and c != '_edge_case']
+        policy_map = {
+            p.column_name: p for p in (column_policies or [])
+            if hasattr(p, 'column_name')
+        }
+        common_cols = [
+            c for c in real_data.columns
+            if c in synthetic_data.columns
+            and c != '_edge_case'
+            and not self._should_skip_reid_column(c, real_data[c], policy_map.get(c))
+        ]
         if not common_cols:
             return None
 
         # Sample for efficiency
-        real_sample = real_data[common_cols].head(500)
-        synth_sample = synthetic_data[common_cols].head(500)
+        real_sample = real_data[common_cols].head(200)
+        synth_sample = synthetic_data[common_cols].head(200)
 
         max_risk = 0.0
         high_risk_count = 0
@@ -309,6 +323,39 @@ class DataValidator:
 
         overlap = real_values & synthetic_values
         return len(overlap) / max(len(synthetic_values), 1)
+
+    def _should_run_sensitive_overlap(self, column_name: str, real_series: pd.Series, synthetic_series: pd.Series, policy) -> bool:
+        """Only flag exact overlap for genuinely sensitive, non-structural values."""
+        upper_name = column_name.upper()
+        if self._is_identifier_like(column_name, real_series):
+            return False
+        if any(token in upper_name for token in ("_ID", "_CD", "_FLG", "_STAT", "_TYPE", "DATE", "_DT", "_TS", "TIME")):
+            return False
+        if pd.api.types.is_numeric_dtype(real_series) or pd.api.types.is_datetime64_any_dtype(real_series) or pd.api.types.is_bool_dtype(real_series):
+            return False
+        unique_count = real_series.dropna().nunique()
+        if unique_count <= 20:
+            return False
+        if len(real_series.dropna()) == 0 or len(synthetic_series.dropna()) == 0:
+            return False
+        return getattr(policy, "masking_strategy", "passthrough") in ("substitute_realistic", "format_preserving")
+
+    def _should_skip_reid_column(self, column_name: str, series: pd.Series, policy) -> bool:
+        """Exclude structural or low-information columns from the expensive re-id pass."""
+        upper_name = column_name.upper()
+        if self._is_identifier_like(column_name, series):
+            return True
+        if any(token in upper_name for token in ("_CD", "_FLG", "_STAT", "_TYPE")):
+            return True
+        if pd.api.types.is_datetime64_any_dtype(series) or any(token in upper_name for token in ("DATE", "_DT", "_TS", "TIME")):
+            return True
+        if pd.api.types.is_bool_dtype(series):
+            return True
+        if series.dropna().nunique() <= 5:
+            return True
+        if policy and getattr(policy, "masking_strategy", "passthrough") == "suppress":
+            return True
+        return False
 
     def validate_lineage_integrity(
         self,
@@ -374,14 +421,13 @@ class DataValidator:
 
                 if col_start in synthetic_data.columns and col_end in synthetic_data.columns:
                     valid_rows = synthetic_data.dropna(subset=[col_start, col_end])
-                    try:
-                        violations = valid_rows[
-                            pd.to_datetime(valid_rows[col_start]) > pd.to_datetime(valid_rows[col_end])
-                        ]
-                        violation_count = len(violations)
-                    except Exception:
-                        violations = valid_rows[valid_rows[col_start] > valid_rows[col_end]]
-                        violation_count = len(violations)
+                    start_dt = pd.to_datetime(valid_rows[col_start], errors='coerce')
+                    end_dt = pd.to_datetime(valid_rows[col_end], errors='coerce')
+                    comparable = start_dt.notna() & end_dt.notna()
+                    if comparable.any():
+                        violation_count = int((start_dt.loc[comparable] > end_dt.loc[comparable]).sum())
+                    else:
+                        violation_count = 0
 
                     results.append(ValidationResult(
                         check_name=f"Temporal: {col_start} <= {col_end}",

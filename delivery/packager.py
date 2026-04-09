@@ -67,6 +67,7 @@ class DeliveryPackager:
         for table_name, df in synthetic_datasets.items():
             # Remove internal metadata columns
             export_df = df.drop(columns=['_edge_case'], errors='ignore')
+            export_df = self._normalize_for_export(export_df)
 
             if actual_output_format == "parquet":
                 path = run_dir / f"{table_name}.parquet"
@@ -119,6 +120,23 @@ class DeliveryPackager:
             logger.info(f"[Delivery] Compressed archive: {archive_path}")
 
         return manifest
+
+    def _normalize_for_export(self, df: pd.DataFrame) -> pd.DataFrame:
+        """Normalize mixed pandas object columns before parquet/CSV export."""
+        export_df = df.copy()
+        for column in export_df.columns:
+            series = export_df[column]
+            if pd.api.types.is_object_dtype(series):
+                non_null = series.dropna()
+                if non_null.empty:
+                    continue
+
+                if non_null.map(lambda value: isinstance(value, (pd.Timestamp, datetime))).any():
+                    export_df[column] = series.map(
+                        lambda value: value.isoformat() if isinstance(value, (pd.Timestamp, datetime)) else value
+                    )
+
+        return export_df
 
     def _parquet_engine_available(self) -> bool:
         """Return True when pandas has an installed parquet backend to use."""

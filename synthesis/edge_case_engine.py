@@ -58,10 +58,12 @@ class EdgeCaseEngine:
             return baseline_df
 
         # Generate edge case records
-        edge_records = []
-        for _ in range(num_edge):
-            # Start with a random baseline record as template
-            template = baseline_df.sample(1).iloc[0].to_dict()
+        result_df = baseline_df.copy().reset_index(drop=True)
+        result_df['_edge_case'] = False
+        replace_indices = random.sample(range(len(result_df)), k=min(num_edge, len(result_df)))
+
+        for row_index in replace_indices:
+            template = result_df.iloc[row_index].to_dict()
 
             # Apply a random edge case spec
             spec = random.choice(edge_specs)
@@ -70,16 +72,13 @@ class EdgeCaseEngine:
 
             template = self._apply_edge_case(template, col, flag, baseline_df)
             template['_edge_case'] = True
-            edge_records.append(template)
+            for key, value in template.items():
+                result_df.at[row_index, key] = value
 
-        edge_df = pd.DataFrame(edge_records)
-
-        # Tag baseline records
-        baseline_df['_edge_case'] = False
-
-        result = pd.concat([baseline_df, edge_df], ignore_index=True)
-        logger.info(f"[EdgeCase] {table_name}: {len(baseline_df)} baseline + {len(edge_df)} edge = {len(result)} total")
-        return result
+        logger.info(
+            f"[EdgeCase] {table_name}: replaced {len(replace_indices)} baseline rows with edge cases; total remains {len(result_df)}"
+        )
+        return result_df
 
     def _apply_edge_case(self, record: dict, column: str, flag: str, baseline_df: pd.DataFrame) -> dict:
         """Apply a specific edge case modification to a record."""

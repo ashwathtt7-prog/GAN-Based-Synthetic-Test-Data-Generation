@@ -52,6 +52,10 @@ class RuleBasedGenerator:
     def _generate_column(self, col_name: str, series: pd.Series, constraint: dict, n: int) -> list:
         """Generate values for a single column based on its distribution and constraints."""
         allowed_values = constraint.get("allowed_values")
+        if isinstance(allowed_values, str):
+            allowed_values = [allowed_values]
+        elif isinstance(allowed_values, dict):
+            allowed_values = list(allowed_values.values())
         if allowed_values and len(allowed_values) > 0:
             # Sample from allowed values with real distribution
             return [random.choice(allowed_values) for _ in range(n)]
@@ -67,16 +71,17 @@ class RuleBasedGenerator:
         is_numeric = pd.api.types.is_numeric_dtype(non_null)
         if not is_numeric and non_null.dtype == object:
             try:
-                non_null = pd.to_numeric(non_null, errors='coerce').dropna()
-                if len(non_null) > 0:
+                numeric_non_null = pd.to_numeric(non_null, errors='coerce').dropna()
+                if len(numeric_non_null) > 0:
+                    non_null = numeric_non_null
                     is_numeric = True
             except Exception:
                 pass
 
         # Numeric column
         if is_numeric:
-            min_val = constraint.get("min", float(non_null.min()))
-            max_val = constraint.get("max", float(non_null.max()))
+            min_val = self._coerce_numeric_bound(constraint.get("min"), float(non_null.min()))
+            max_val = self._coerce_numeric_bound(constraint.get("max"), float(non_null.max()))
             mean_val = float(non_null.mean())
             std_val = float(non_null.std()) if len(non_null) > 1 else 0
 
@@ -98,7 +103,10 @@ class RuleBasedGenerator:
             value_counts = non_null.value_counts(normalize=True)
             categories = value_counts.index.tolist()
             weights = value_counts.values.tolist()
-            values = random.choices(categories, weights=weights, k=n)
+            if not categories:
+                values = [None] * n
+            else:
+                values = random.choices(categories, weights=weights, k=n)
         else:
             # High cardinality: sample with replacement from observed values
             values = non_null.sample(n=n, replace=True).tolist()
@@ -109,3 +117,12 @@ class RuleBasedGenerator:
                 values[i] = None
 
         return values
+
+    def _coerce_numeric_bound(self, raw_value, fallback: float) -> float:
+        """Convert configured min/max bounds into numeric values when possible."""
+        if raw_value is None:
+            return fallback
+        try:
+            return float(raw_value)
+        except (TypeError, ValueError):
+            return fallback

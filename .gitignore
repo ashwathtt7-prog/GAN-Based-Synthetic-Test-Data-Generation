@@ -27,6 +27,7 @@ datasets/seed_data/*.csv
 datasets/seed_data/*.parquet
 output/
 models/*.pkl
+models/trained/
 
 # SQLite databases
 *.db*

@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import { ArrowLeftRight, ChevronDown, RefreshCw, Table2, X } from 'lucide-react';
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = "http://localhost:8001/api";
 
 const EMPTY_DATA = { rows: [], columns: [] };
 

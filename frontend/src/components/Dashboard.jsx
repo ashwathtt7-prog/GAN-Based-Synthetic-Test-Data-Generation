@@ -6,7 +6,7 @@ import GenerationLog from './GenerationLog';
 import DataViewer from './DataViewer';
 import ReasoningPanel from './ReasoningPanel';
 
-const API_BASE = "http://localhost:8000/api";
+const API_BASE = "http://localhost:8001/api";
 
 const Dashboard = () => {
   const [stats, setStats] = useState(null);
@@ -167,7 +167,7 @@ const Dashboard = () => {
             className="flex items-center gap-2 bg-gray-700 hover:bg-gray-600 px-3 py-2.5 rounded-lg font-medium text-sm transition-all"
           >
             <Cpu size={16} />
-            Generation Tiers
+            Generation Insights
           </button>
           <button
             onClick={() => setShowDataViewer(true)}

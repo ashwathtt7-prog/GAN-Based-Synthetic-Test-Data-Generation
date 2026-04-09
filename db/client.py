@@ -259,13 +259,33 @@ class DatabaseClient:
     def register_model(self, session: Session, model_data: dict):
         """Register a trained model."""
         from db.schema import ModelRegistry
+        table_name = model_data.get("table_name")
+        model_type = model_data.get("model_type")
+        if table_name and model_type:
+            session.query(ModelRegistry).filter_by(
+                table_name=table_name,
+                model_type=model_type,
+                is_active=True,
+            ).update({"is_active": False})
+
         model = ModelRegistry(**model_data)
         session.add(model)
         return model
 
-    def get_active_model(self, session: Session, table_name: str):
+    def get_active_model(self, session: Session, table_name: str, model_type: str = None):
         """Get the active model for a table."""
         from db.schema import ModelRegistry
-        return session.query(ModelRegistry).filter_by(
+        query = session.query(ModelRegistry).filter_by(
             table_name=table_name, is_active=True
-        ).first()
+        )
+        if model_type:
+            query = query.filter_by(model_type=model_type)
+        return query.order_by(ModelRegistry.trained_at.desc()).first()
+
+    def get_registered_models(self, session: Session, table_name: str, model_type: str = None, limit: int = 10):
+        """Return recent registered models for compatibility matching."""
+        from db.schema import ModelRegistry
+        query = session.query(ModelRegistry).filter_by(table_name=table_name)
+        if model_type:
+            query = query.filter_by(model_type=model_type)
+        return query.order_by(ModelRegistry.is_active.desc(), ModelRegistry.trained_at.desc()).limit(limit).all()
