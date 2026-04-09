@@ -98,6 +98,19 @@ class GenerationRunLog(Base):
     completed_at = Column(DateTime)
 
 
+class TableMetadataRecord(Base):
+    """Stores table-level metadata extracted during ingestion."""
+    __tablename__ = "table_metadata"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    table_name = Column(String, nullable=False, unique=True)
+    row_count = Column(Integer, default=0)
+    column_count = Column(Integer, default=0)
+    domain = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+
 class PipelineRun(Base):
     """Tracks simple pipeline run meta status for UI"""
     __tablename__ = "pipeline_run"

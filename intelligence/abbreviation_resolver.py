@@ -1,37 +1,32 @@
 """
 Abbreviation Resolver
-Expands telecom abbreviations using Neo4j dictionary and contextual heuristics.
+Expands telecom abbreviations using the in-memory knowledge graph dictionary.
 """
 
-from graph.graph_tools import get_driver
+from graph.knowledge_graph import get_knowledge_graph
+
 
 class AbbreviationResolver:
     def __init__(self):
-        pass
+        self.kg = get_knowledge_graph()
 
     def resolve_column_name(self, column_name: str) -> tuple[str, bool]:
         """
         Attempts to resolve a column name like CUST_TEN_MNT to Customer Tenure Month.
         Returns: (expanded_name, is_fully_resolved)
         """
-        driver = get_driver()
         tokens = column_name.split('_')
         expanded_tokens = []
         fully_resolved = True
-        
-        with driver.session() as session:
-            for token in tokens:
-                # Query global abbreviation dictionary
-                result = session.run(f"MATCH (a:AbbreviationDict {{id: 'global'}}) RETURN a.`{token}` as exp")
-                record = result.single()
-                
-                if record and record["exp"]:
-                    expanded_tokens.append(record["exp"])
-                else:
-                    # Token not in dictionary
-                    expanded_tokens.append(token)
-                    fully_resolved = False
-                    
+
+        for token in tokens:
+            expansion = self.kg.get_abbreviation(token)
+            if expansion != "null":
+                expanded_tokens.append(expansion)
+            else:
+                expanded_tokens.append(token)
+                fully_resolved = False
+
         return " ".join(expanded_tokens), fully_resolved
 
     def expand_value_pattern(self, top_values: list[dict], column_name: str) -> dict:
@@ -41,15 +36,14 @@ class AbbreviationResolver:
         """
         if not top_values:
             return {"pattern_type": "unknown"}
-            
-        # Example pattern inference
+
         num_unique_in_top = len(top_values)
-        if num_unique_in_top <= 10 and "_CD" in column_name or "STAT" in column_name:
+        if num_unique_in_top <= 10 and ("_CD" in column_name or "STAT" in column_name):
             return {"pattern_type": "finite_categorical"}
-            
-        # Check if values are mostly numeric
-        mostly_numeric = all(str(v["value"]).replace(".","").isdigit() for v in top_values[:5])
+
+        mostly_numeric = all(str(v.get("value", "")).replace(".", "").replace("-", "").isdigit()
+                             for v in top_values[:5])
         if mostly_numeric:
-             return {"pattern_type": "numeric_measure"}
-             
+            return {"pattern_type": "numeric_measure"}
+
         return {"pattern_type": "high_cardinality_string"}

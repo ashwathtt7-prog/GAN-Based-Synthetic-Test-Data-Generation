@@ -29,7 +29,7 @@ output/
 models/*.pkl
 
 # SQLite databases
-*.db
+*.db*
 *.sqlite
 *.sqlite3
 

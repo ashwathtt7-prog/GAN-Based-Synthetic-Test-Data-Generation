@@ -49,6 +49,10 @@ python-jose[cryptography]>=3.4.0
 passlib[bcrypt]>=1.7.4
 httpx>=0.28.1
 
+# >== Graph Analysis >==
+networkx>=3.3
+python-louvain>=0.16
+
 # >== Utilities >==
 pyyaml>=6.0.2
 python-dotenv>=1.1.0

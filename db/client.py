@@ -98,6 +98,9 @@ class DatabaseClient:
         finally:
             session.close()
 
+    # Alias for backward compatibility
+    get_session = session
+
     # === Column Policy Operations ===
     def upsert_column_policy(self, session: Session, policy_data: dict):
         """Insert or update a column policy."""

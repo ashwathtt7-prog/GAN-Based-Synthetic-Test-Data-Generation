@@ -4,7 +4,7 @@
 # === LLM Configuration ===
 llm:
   provider: "gemini"                    # options: gemini, ollama
-  model: "gemini-2.5-flash-preview-04-17"  # Gemini 2.5 Flash
+  model: "gemini-2.5-flash"  # Gemini 2.5 Flash (GA)
   ollama_base_url: "http://localhost:11434"  # used if provider=ollama
   ollama_model: "gemma3:4b"             # local model for production
   temperature: 0.1                      # low temp for deterministic output
@@ -12,7 +12,7 @@ llm:
   structured_output: true               # enforce JSON schema on every call
   retry_max: 3                          # max retries on validation failure
   confidence_threshold: 0.6             # below this → human review queue
-  service_account_path: "verizon-aid-091954da3180 (1).json"
+  service_account_path: "../service-account.json"
 
 # === Database Configuration ===
 database:
