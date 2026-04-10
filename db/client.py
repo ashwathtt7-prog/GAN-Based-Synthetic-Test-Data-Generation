@@ -6,7 +6,7 @@ Handles SQLite for POC, swappable to PostgreSQL via config.
 import yaml
 from pathlib import Path
 from contextlib import contextmanager
-from sqlalchemy import create_engine, event
+from sqlalchemy import create_engine, event, inspect, text
 from sqlalchemy.orm import sessionmaker, Session
 from datetime import datetime
 from db.schema import Base
@@ -85,7 +85,30 @@ class DatabaseClient:
     def initialize(self):
         """Create all tables."""
         init_db(self.engine)
+        self.ensure_schema_compatibility()
         self.mark_incomplete_runs_failed()
+
+    def ensure_schema_compatibility(self):
+        """Add newly introduced columns for existing SQLite databases."""
+        additions = {
+            "pipeline_run": {
+                "table_filter": "TEXT",
+                "fast_mode": "BOOLEAN DEFAULT 0",
+            },
+            "human_review_queue": {
+                "run_id": "VARCHAR",
+                "is_blocking": "BOOLEAN DEFAULT 0",
+            },
+        }
+
+        inspector = inspect(self.engine)
+        with self.engine.begin() as connection:
+            for table_name, columns in additions.items():
+                existing = {column["name"] for column in inspector.get_columns(table_name)}
+                for column_name, sql_type in columns.items():
+                    if column_name in existing:
+                        continue
+                    connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}"))
 
     @contextmanager
     def session(self):
@@ -110,7 +133,7 @@ class DatabaseClient:
         with self.session() as session:
             now = datetime.utcnow()
             stale_runs = session.query(PipelineRun).filter(
-                PipelineRun.status.in_(["initialized", "running"])
+                PipelineRun.status.in_(["initialized", "running", "waiting_review"])
             ).all()
             for run in stale_runs:
                 run.status = "failed"
@@ -118,7 +141,7 @@ class DatabaseClient:
                 run.ended_at = now
 
             stale_logs = session.query(GenerationRunLog).filter(
-                GenerationRunLog.status == "running"
+                GenerationRunLog.status.in_(["running", "waiting_review"])
             ).all()
             for log in stale_logs:
                 log.status = "failed"
@@ -210,10 +233,15 @@ class DatabaseClient:
         session.add(item)
         return item
 
-    def get_pending_reviews(self, session: Session):
+    def get_pending_reviews(self, session: Session, run_id: str = None, blocking_only: bool = False):
         """Get all pending review items."""
         from db.schema import HumanReviewQueue
-        return session.query(HumanReviewQueue).filter_by(status="pending").all()
+        query = session.query(HumanReviewQueue).filter_by(status="pending")
+        if run_id:
+            query = query.filter_by(run_id=run_id)
+        if blocking_only:
+            query = query.filter_by(is_blocking=True)
+        return query.order_by(HumanReviewQueue.created_at.asc()).all()
 
     # === Run Log Operations ===
     def create_run_log(self, session: Session, run_id: str, domains: list):

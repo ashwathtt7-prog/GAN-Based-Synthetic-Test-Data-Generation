@@ -53,7 +53,7 @@ def startup_event():
 # =====================================================
 
 @app.get("/api/dashboard/stats", response_model=schemas.DashboardStats)
-def get_dashboard_stats():
+def get_dashboard_stats(run_id: str | None = None):
     """Aggregate statistics for the dashboard."""
     with db_client.session() as session:
         total_tables = session.query(db_models.TableMetadataRecord).count()
@@ -67,20 +67,29 @@ def get_dashboard_stats():
         pii_cols = session.query(db_models.ColumnPolicy).filter(
             db_models.ColumnPolicy.pii_classification != 'none'
         ).count()
-        pending_review = session.query(db_models.HumanReviewQueue).filter(
+        pending_query = session.query(db_models.HumanReviewQueue).filter(
             db_models.HumanReviewQueue.status == 'pending'
-        ).count()
+        )
+        if run_id:
+            pending_query = pending_query.filter(db_models.HumanReviewQueue.run_id == run_id)
+        pending_review = pending_query.count()
 
         # Latest run
-        last_run = session.query(db_models.PipelineRun).order_by(
-            db_models.PipelineRun.started_at.desc()
-        ).first()
+        if run_id:
+            last_run = session.query(db_models.PipelineRun).filter_by(run_id=run_id).first()
+        else:
+            last_run = session.query(db_models.PipelineRun).order_by(
+                db_models.PipelineRun.started_at.desc()
+            ).first()
         run_status = last_run.status if last_run else "idle"
 
         # Validation pass rate
-        run_log = session.query(db_models.GenerationRunLog).order_by(
-            db_models.GenerationRunLog.started_at.desc()
-        ).first()
+        if run_id:
+            run_log = session.query(db_models.GenerationRunLog).filter_by(run_id=run_id).first()
+        else:
+            run_log = session.query(db_models.GenerationRunLog).order_by(
+                db_models.GenerationRunLog.started_at.desc()
+            ).first()
         pass_rate = 0.0
         if run_log and run_log.validation_results:
             total_checks = 0
@@ -109,18 +118,18 @@ def get_dashboard_stats():
 # =====================================================
 
 @app.get("/api/review/queue", response_model=list[schemas.ReviewQueueItem])
-def get_review_queue():
+def get_review_queue(run_id: str | None = None, blocking_only: bool = False):
     """Get all pending flags."""
     with db_client.session() as session:
-        items = session.query(db_models.HumanReviewQueue).filter(
-            db_models.HumanReviewQueue.status == 'pending'
-        ).all()
+        items = db_client.get_pending_reviews(session, run_id=run_id, blocking_only=blocking_only)
         return [schemas.ReviewQueueItem(
             id=i.id,
+            run_id=i.run_id,
             table_name=i.table_name or "",
             column_name=i.column_name or "",
             llm_best_guess=i.llm_best_guess,
             flag_reason=i.flag_reason or "",
+            is_blocking=bool(i.is_blocking),
             status=i.status or "pending",
             reviewer_notes=i.reviewer_notes,
             reviewed_at=i.reviewed_at.isoformat() if i.reviewed_at else None,
@@ -187,7 +196,7 @@ def submit_abbreviation(item_id: int, submission: schemas.AbbreviationSubmission
         item = session.query(db_models.HumanReviewQueue).filter_by(id=item_id).first()
         if item:
             item.status = "corrected"
-            item.reviewer_notes = f"Abbreviation: {submission.token} → {submission.expansion}. {submission.reviewer_notes or ''}"
+            item.reviewer_notes = f"Abbreviation: {submission.token} -> {submission.expansion}. {submission.reviewer_notes or ''}"
             item.reviewed_at = datetime.utcnow()
 
     return {
@@ -213,7 +222,7 @@ def start_pipeline(request: PipelineStartRequest = None):
     """
     table_filter = request.table_filter if request else None
     fast_mode = request.fast_mode if request else False
-    run_id = orchestrator.initialize_run()
+    run_id = orchestrator.initialize_run(table_filter=table_filter, fast_mode=fast_mode)
     t = threading.Thread(target=orchestrator.execute_pipeline, args=(run_id, table_filter, fast_mode), daemon=True)
     t.start()
     return {"message": "Pipeline started", "run_id": run_id, "table_filter": table_filter, "fast_mode": fast_mode}
@@ -243,6 +252,11 @@ def get_pipeline_status(run_id: str):
 
         # Get domain info from run log
         run_log = session.query(db_models.GenerationRunLog).filter_by(run_id=run_id).first()
+        blocking_reviews_pending = session.query(db_models.HumanReviewQueue).filter_by(
+            run_id=run_id,
+            status="pending",
+            is_blocking=True,
+        ).count()
 
         return schemas.PipelineRunStatus(
             run_id=run.run_id,
@@ -252,7 +266,9 @@ def get_pipeline_status(run_id: str):
             started_at=run.started_at.isoformat() if run.started_at else "",
             elapsed_seconds=elapsed,
             domains_completed=run_log.domains_completed or [] if run_log else [],
-            domains_pending=run_log.domains_pending or [] if run_log else []
+            domains_pending=run_log.domains_pending or [] if run_log else [],
+            blocking_reviews_pending=blocking_reviews_pending,
+            table_filter=run.table_filter or None,
         )
 
 
@@ -270,7 +286,9 @@ def list_pipeline_runs():
             current_step=r.current_step,
             progress_pct=r.progress_pct or 0.0,
             started_at=r.started_at.isoformat() if r.started_at else "",
-            elapsed_seconds=0.0
+            elapsed_seconds=0.0,
+            blocking_reviews_pending=0,
+            table_filter=r.table_filter or None,
         ) for r in runs]
 
 
@@ -396,16 +414,19 @@ def _get_source_table_names() -> list[str]:
         return []
 
 
-def _build_manifest_generation_entries() -> list[dict]:
+def _build_manifest_generation_entries(run_id: str | None = None) -> list[dict]:
     entries = []
     for item in _list_run_manifests():
         run_dir = item["run_dir"]
         manifest = item["manifest"]
+        manifest_run_id = manifest.get("run_id", run_dir.name)
+        if run_id and manifest_run_id != run_id:
+            continue
         row_counts = manifest.get("row_counts", {})
         strategies = manifest.get("generation_strategies", {})
         for table_name in manifest.get("tables_generated", []):
             entries.append({
-                "run_id": manifest.get("run_id", run_dir.name),
+                "run_id": manifest_run_id,
                 "table_name": table_name,
                 "tier": strategies.get(table_name, "unknown"),
                 "rows_generated": row_counts.get(table_name, 0),
@@ -427,24 +448,56 @@ def _resolve_latest_run_id(session, requested_run_id: str | None = None) -> str 
     ).first()
     return latest_run.run_id if latest_run else None
 
+
+def _get_run_requested_tables(session, run_id: str | None) -> list[str]:
+    """Resolve the requested table set for a run, or fall back to all source tables."""
+    if not run_id:
+        return _get_source_table_names()
+
+    run = session.query(db_models.PipelineRun).filter_by(run_id=run_id).first()
+    if run and run.table_filter:
+        return sorted(run.table_filter)
+
+    return _get_source_table_names()
+
 @app.get("/api/generation/log")
-def get_generation_log():
+def get_generation_log(run_id: str | None = None):
     """
     Return tier routing history for generated tables.
     Prefers live step logs and falls back to delivery manifests for older runs.
     """
     with db_client.session() as session:
+        resolved_run_id = _resolve_latest_run_id(session, run_id)
+        if not resolved_run_id:
+            return []
+
         strategies = session.query(db_models.GenerationStrategy).all()
         step_logs = session.query(db_models.PipelineStepLog).filter(
+            db_models.PipelineStepLog.run_id == resolved_run_id,
             db_models.PipelineStepLog.step_name.in_(["tier_routing", "generation_complete"])
         ).order_by(db_models.PipelineStepLog.started_at.desc()).all()
-        pipeline_runs = session.query(db_models.PipelineRun).all()
+        pipeline_runs = session.query(db_models.PipelineRun).filter_by(run_id=resolved_run_id).all()
+        requested_tables = _get_run_requested_tables(session, resolved_run_id)
+        meta_records = session.query(db_models.TableMetadataRecord).all()
 
         tier_map = {s.table_name: s.tier_override or "auto" for s in strategies}
         domain_map = {s.table_name: s.domain for s in strategies}
+        meta_domain_map = {record.table_name: record.domain or "unknown" for record in meta_records}
         run_map = {r.run_id: r for r in pipeline_runs}
 
-        entries = {}
+        entries = {
+            (resolved_run_id, table_name): {
+                "run_id": resolved_run_id,
+                "table_name": table_name,
+                "tier": tier_map.get(table_name, "pending"),
+                "rows_generated": 0,
+                "domain": meta_domain_map.get(table_name) or domain_map.get(table_name, "unknown"),
+                "status": "pending",
+                "started_at": run_map.get(resolved_run_id).started_at.isoformat() if run_map.get(resolved_run_id) and run_map.get(resolved_run_id).started_at else None,
+                "completed_at": None,
+            }
+            for table_name in requested_tables
+        }
         for step in reversed(step_logs):
             if not step.table_name:
                 continue
@@ -455,8 +508,8 @@ def get_generation_log():
                 "table_name": step.table_name,
                 "tier": tier_map.get(step.table_name, "unknown"),
                 "rows_generated": 0,
-                "domain": step.domain or domain_map.get(step.table_name, "unknown"),
-                "status": run.status if run else step.status,
+                "domain": step.domain or meta_domain_map.get(step.table_name) or domain_map.get(step.table_name, "unknown"),
+                "status": "running" if run and run.status == "running" else (run.status if run else step.status),
                 "started_at": run.started_at.isoformat() if run and run.started_at else None,
                 "completed_at": run.ended_at.isoformat() if run and run.ended_at else None,
             })
@@ -472,11 +525,11 @@ def get_generation_log():
 
             entries[key] = entry
 
-    for item in _build_manifest_generation_entries():
+    for item in _build_manifest_generation_entries(run_id=resolved_run_id):
         key = (item["run_id"], item["table_name"])
         existing = entries.get(key)
         if not existing:
-            item["domain"] = domain_map.get(item["table_name"], "unknown")
+            item["domain"] = meta_domain_map.get(item["table_name"]) or domain_map.get(item["table_name"], "unknown")
             entries[key] = item
             continue
         if existing.get("tier") in (None, "unknown", "auto"):
@@ -485,15 +538,17 @@ def get_generation_log():
             existing["rows_generated"] = item["rows_generated"]
         if not existing.get("completed_at"):
             existing["completed_at"] = item["completed_at"]
+        if item["rows_generated"]:
+            existing["status"] = "completed"
 
     return sorted(
         entries.values(),
         key=lambda item: (
+            item.get("status") != "completed",
             item.get("completed_at") or item.get("started_at") or "",
             item["run_id"],
             item["table_name"],
         ),
-        reverse=True,
     )
 
 
@@ -611,19 +666,22 @@ def get_training_metrics(run_id: str | None = None):
 
 
 @app.get("/api/data/tables")
-def get_data_tables():
+def get_data_tables(run_id: str | None = None):
     """Return all source tables plus generated-data availability for the viewer."""
-    source_tables = _get_source_table_names()
-    manifest_entries = _build_manifest_generation_entries()
+    manifest_entries = _build_manifest_generation_entries(run_id=run_id)
     latest_generated = {}
     for entry in manifest_entries:
         latest_generated.setdefault(entry["table_name"], entry)
 
     with db_client.session() as session:
+        resolved_run_id = _resolve_latest_run_id(session, run_id) if run_id else None
+        source_tables = _get_run_requested_tables(session, resolved_run_id) if run_id else _get_source_table_names()
         table_meta = session.query(db_models.TableMetadataRecord).all()
         meta_map = {t.table_name: t for t in table_meta}
 
     all_tables = sorted(set(source_tables) | set(latest_generated.keys()) | set(meta_map.keys()))
+    if run_id:
+        all_tables = [table_name for table_name in all_tables if table_name in set(source_tables)]
     return [{
         "table_name": table_name,
         "domain": getattr(meta_map.get(table_name), "domain", None) or latest_generated.get(table_name, {}).get("domain", "unknown"),
@@ -650,7 +708,7 @@ def get_generated_data(table_name: str, run_id: str | None = None):
             "message": f"No generated data found for table '{table_name}'.",
         }
 
-    rows = df.head(50).to_dict(orient="records")
+    rows = _json_safe(df.head(50).to_dict(orient="records"))
     return {
         "table_name": table_name,
         "run_id": resolved_run_id,
@@ -668,7 +726,7 @@ def get_source_data(table_name: str):
         engine = _get_source_engine()
         total_rows = pd.read_sql(f'SELECT COUNT(*) AS total_rows FROM "{table_name}"', engine).iloc[0]["total_rows"]
         df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT 50', engine)
-        rows = df.head(50).to_dict(orient="records")
+        rows = _json_safe(df.head(50).to_dict(orient="records"))
         return {
             "table_name": table_name,
             "total_rows": int(total_rows),
@@ -685,13 +743,16 @@ def get_source_data(table_name: str):
 # =====================================================
 
 @app.get("/api/pipeline/activity-log")
-def get_pipeline_activity_log():
+def get_pipeline_activity_log(run_id: str | None = None):
     """
     Return step-by-step activity log from the pipeline.
     Reads from the pipeline_step_log table.
     """
     with db_client.session() as session:
-        steps = session.query(db_models.PipelineStepLog).order_by(
+        query = session.query(db_models.PipelineStepLog)
+        if run_id:
+            query = query.filter_by(run_id=run_id)
+        steps = query.order_by(
             db_models.PipelineStepLog.started_at.desc()
         ).limit(200).all()
 

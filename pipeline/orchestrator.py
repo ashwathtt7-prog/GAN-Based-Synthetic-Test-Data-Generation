@@ -12,6 +12,7 @@ import ast
 import logging
 import os
 import re
+import time
 
 for env_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(env_var, "1")
@@ -77,7 +78,7 @@ class PipelineOrchestrator:
         self.table_profiles_cache = {}   # {table_name: TableGenerationProfile}
         self.generated_tiers = {}       # {table_name: str}
 
-    def initialize_run(self) -> str:
+    def initialize_run(self, table_filter: list[str] = None, fast_mode: bool = False) -> str:
         self.run_id = str(uuid.uuid4())
         self.generated_data = {}
         self.column_policies_cache = {}
@@ -88,7 +89,9 @@ class PipelineOrchestrator:
             run = db_models.PipelineRun(
                 run_id=self.run_id,
                 status="initialized",
-                current_step="Starting"
+                current_step="Starting",
+                table_filter=table_filter,
+                fast_mode=fast_mode,
             )
             session.add(run)
             session.commit()
@@ -312,13 +315,11 @@ class PipelineOrchestrator:
                     # Queue low confidence for human review
                     if policy.llm_confidence < confidence_threshold:
                         self._queue_for_review(
-                            table.table_name, col.column_name, policy, "Low Confidence Score"
-                        )
-
-                    # Queue unresolved abbreviations for human review
-                    if not fully_resolved:
-                        self._queue_for_review(
-                            table.table_name, col.column_name, policy, "ABBREVIATION_UNKNOWN"
+                            table.table_name,
+                            col.column_name,
+                            policy,
+                            "Low Confidence Score",
+                            is_blocking=True,
                         )
 
                     self._save_column_policy(policy, pii_source="llm")
@@ -345,6 +346,8 @@ class PipelineOrchestrator:
 
                 self.column_policies_cache[table.table_name] = table_policies
                 self.strategies_cache[table.table_name] = strategy
+
+            self._wait_for_blocking_reviews_if_needed()
 
             # ================================================================
             # Phase 5: Synthetic Generation Engine (Layer 3)
@@ -798,15 +801,63 @@ class PipelineOrchestrator:
                 completed_tables.append(table_name)
                 run_log.tables_completed = completed_tables
 
-    def _queue_for_review(self, table_name: str, column_name: str, policy, reason: str):
+    def _queue_for_review(self, table_name: str, column_name: str, policy, reason: str, is_blocking: bool = False):
         """Add a column to the human review queue."""
         with self.db_client.session() as session:
             self.db_client.add_to_review_queue(session, {
+                "run_id": self.run_id,
                 "table_name": table_name,
                 "column_name": column_name,
                 "llm_best_guess": policy.model_dump(),
-                "flag_reason": reason
+                "flag_reason": reason,
+                "is_blocking": is_blocking,
             })
+
+    def _count_pending_blocking_reviews(self) -> int:
+        """Return the number of unresolved blocking review items for the active run."""
+        with self.db_client.session() as session:
+            return session.query(db_models.HumanReviewQueue).filter_by(
+                run_id=self.run_id,
+                status="pending",
+                is_blocking=True,
+            ).count()
+
+    def _wait_for_blocking_reviews_if_needed(self):
+        """Pause before generation when the configured review mode requires approval."""
+        review_mode = (self.config.get("pipeline", {}) or {}).get("human_review_mode", "skip").lower()
+        if review_mode != "wait":
+            return
+
+        pending_reviews = self._count_pending_blocking_reviews()
+        if pending_reviews == 0:
+            return
+
+        self._log_step(
+            "human_review_gate",
+            status="running",
+            details={"pending_reviews": pending_reviews},
+        )
+
+        with self.db_client.session() as session:
+            self.db_client.update_run_log(session, self.run_id, status="waiting_review")
+
+        while pending_reviews > 0:
+            self._update_status(
+                f"Awaiting review approval ({pending_reviews})",
+                60.0,
+                "waiting_review",
+            )
+            time.sleep(2)
+            pending_reviews = self._count_pending_blocking_reviews()
+
+        with self.db_client.session() as session:
+            self.db_client.update_run_log(session, self.run_id, status="running")
+
+        self._log_step(
+            "human_review_gate",
+            status="completed",
+            details={"pending_reviews": 0},
+        )
 
     def _register_model(self, table_name, domain, path, model_type, row_count, fingerprint=None, profile=None, training_epochs=None):
         """Register a trained model in the model registry."""

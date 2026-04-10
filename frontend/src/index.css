@@ -1,26 +1,30 @@
-@import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&display=swap');
 @import "tailwindcss";
 
 @theme {
-  --color-telecom-dark: #0B0F19;
-  --color-telecom-card: #111827;
-  --color-telecom-accent: #3B82F6;
-  --color-telecom-success: #10B981;
-  --color-telecom-warning: #F59E0B;
-  --color-telecom-danger: #EF4444;
+  --color-telecom-dark: #f5f7fb;
+  --color-telecom-card: #ffffff;
+  --color-telecom-accent: #2563eb;
+  --color-telecom-success: #16a34a;
+  --color-telecom-warning: #d97706;
+  --color-telecom-danger: #dc2626;
 }
 
 @layer base {
   body {
-    background-color: #050511;
+    background-color: #f5f7fb;
     background-image:
-      radial-gradient(at 0% 0%, hsla(253,16%,7%,1) 0, transparent 50%),
-      radial-gradient(at 50% 0%, hsla(225,39%,30%,0.1) 0, transparent 50%),
-      radial-gradient(at 100% 0%, hsla(339,49%,30%,0.1) 0, transparent 50%);
-    color: #E5E7EB;
-    font-family: 'Inter', sans-serif;
+      radial-gradient(at 10% 10%, rgba(37, 99, 235, 0.08) 0, transparent 55%),
+      radial-gradient(at 90% 0%, rgba(14, 116, 144, 0.08) 0, transparent 45%),
+      radial-gradient(at 50% 100%, rgba(99, 102, 241, 0.06) 0, transparent 60%);
+    color: #0f172a;
+    font-family: 'Space Grotesk', sans-serif;
     -webkit-font-smoothing: antialiased;
     background-attachment: fixed;
+  }
+
+  .font-mono {
+    font-family: 'IBM Plex Mono', ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
   }
 }
 
@@ -30,12 +34,12 @@
   height: 8px;
 }
 ::-webkit-scrollbar-track {
-  background: #0B0F19;
+  background: #e2e8f0;
 }
 ::-webkit-scrollbar-thumb {
-  background: #374151;
+  background: #94a3b8;
   border-radius: 4px;
 }
 ::-webkit-scrollbar-thumb:hover {
-  background: #4B5563;
+  background: #64748b;
 }

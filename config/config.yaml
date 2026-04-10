@@ -93,7 +93,7 @@ delivery:
 
 # === Pipeline ===
 pipeline:
-  human_review_mode: "skip"             # "wait" or "skip" — skip for automated POC
+  human_review_mode: "wait"             # "wait" or "skip" — keep minimal blocking review before generation
   resume_on_crash: true                 # resume from last completed domain
   domain_generation_order: "dependency" # "dependency" or "alphabetical"
 

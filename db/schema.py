@@ -120,6 +120,8 @@ class PipelineRun(Base):
     status = Column(String)
     current_step = Column(String)
     progress_pct = Column(Float, default=0.0)
+    table_filter = Column(JSON)
+    fast_mode = Column(Boolean, default=False)
     started_at = Column(DateTime, default=datetime.utcnow)
     ended_at = Column(DateTime)
 
@@ -130,10 +132,12 @@ class HumanReviewQueue(Base):
     __tablename__ = "human_review_queue"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    run_id = Column(String)
     table_name = Column(String)
     column_name = Column(String)
     llm_best_guess = Column(JSON)  # JSON of LLM's best attempt
     flag_reason = Column(String)  # low_confidence, abbreviation_unknown, validation_failed
+    is_blocking = Column(Boolean, default=False)
     status = Column(String, default="pending")  # pending, approved, corrected
     reviewer_notes = Column(Text)
     reviewed_at = Column(DateTime)

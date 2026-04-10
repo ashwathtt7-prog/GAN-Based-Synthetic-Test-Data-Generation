@@ -166,10 +166,12 @@ class DeliveryManifest(BaseModel):
 class ReviewQueueItem(BaseModel):
     """API model for human review queue items."""
     id: int
+    run_id: Optional[str] = None
     table_name: str
     column_name: str
     llm_best_guess: Optional[dict] = None
     flag_reason: str
+    is_blocking: bool = False
     status: str = "pending"
     reviewer_notes: Optional[str] = None
     reviewed_at: Optional[str] = None
@@ -204,6 +206,8 @@ class PipelineRunStatus(BaseModel):
     progress_pct: float = 0.0
     started_at: str
     elapsed_seconds: float = 0.0
+    blocking_reviews_pending: int = 0
+    table_filter: Optional[list[str]] = None
 
 
 class DashboardStats(BaseModel):
