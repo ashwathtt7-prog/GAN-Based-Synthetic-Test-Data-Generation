@@ -2,6 +2,7 @@ import React, { useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
   Activity,
+  AlertTriangle,
   Brain,
   CheckCircle,
   Database,
@@ -16,6 +17,7 @@ import GenerationLog from './GenerationLog';
 import DataViewer from './DataViewer';
 import GraphView from './GraphView';
 import ReasoningPanel from './ReasoningPanel';
+import EdgeCasePanel from './EdgeCasePanel';
 
 const API_BASE = "http://localhost:8001/api";
 
@@ -24,22 +26,41 @@ const MENU_ITEMS = [
   { id: 'review', label: 'Human Review', icon: ShieldCheck },
   { id: 'insights', label: 'Live Progress', icon: Sparkles },
   { id: 'data', label: 'View Data', icon: Database },
+  { id: 'edge_cases', label: 'Edge Cases', icon: AlertTriangle },
   { id: 'graph', label: 'Graph', icon: Network },
   { id: 'policies', label: 'Policies', icon: Brain },
 ];
 
 const FALLBACK_SOURCES = [
   {
-    name: 'telecom_poc',
-    label: 'Telecom Source DB',
-    description: '22-table telecom source with customer, billing, and network domains.',
+    name: 'telecom_sqlite',
+    label: 'Telecom OLTP (SQLite)',
+    description: '22-table telecom schema served from a SQLite OLTP file.',
+    backend: 'SQLite file (row store, OLTP)',
     table_count: 22,
     is_default: true,
   },
   {
+    name: 'telecom_duckdb_dw',
+    label: 'Telecom Warehouse (DuckDB)',
+    description: 'Same 22-table telecom schema loaded into a DuckDB warehouse file.',
+    backend: 'DuckDB file (columnar OLAP warehouse)',
+    table_count: 22,
+    is_default: false,
+  },
+  {
+    name: 'telecom_parquet_lake',
+    label: 'Telecom Parquet Lake (DuckDB)',
+    description: '22 telecom tables exposed as DuckDB tables backed by Parquet files on disk.',
+    backend: 'Parquet files served through DuckDB (data-lake / lakehouse pattern)',
+    table_count: 22,
+    is_default: false,
+  },
+  {
     name: 'demo_showcase',
-    label: 'Retail Mini Demo DB',
-    description: '4-table relational demo with customers, products, orders, and order items.',
+    label: 'Retail Mini Demo',
+    description: '4-table retail relational demo with customers, products, orders, and order items.',
+    backend: 'SQLite file (row store, small demo)',
     table_count: 4,
     is_default: false,
   },
@@ -85,6 +106,7 @@ const Dashboard = () => {
   const [startMessage, setStartMessage] = useState('');
   const [startError, setStartError] = useState('');
   const [reviewNotes, setReviewNotes] = useState({});
+  const [selectedTable, setSelectedTable] = useState(null);
 
   const activeRun = useMemo(
     () => runs.find((run) => run.run_id === selectedRunId) || null,
@@ -370,8 +392,13 @@ const Dashboard = () => {
                       {selectedSource.description}
                     </p>
                   )}
+                  {selectedSource?.backend && (
+                    <p className="mt-1 text-[11px] font-semibold uppercase tracking-[0.14em] text-slate-500">
+                      Backend: <span className="font-normal text-slate-600 normal-case tracking-normal">{selectedSource.backend}</span>
+                    </p>
+                  )}
                   <p className="mt-1 text-[11px] text-slate-400">
-                    Available now: Telecom Source DB and Retail Mini Demo DB.
+                    Three telecom sources on three backends (SQLite OLTP, DuckDB warehouse, DuckDB parquet lake) plus the retail mini demo.
                   </p>
                 </div>
                 <div className="mt-4">
@@ -493,11 +520,32 @@ const Dashboard = () => {
         )}
 
         {active === 'data' && (
-          <DataViewer runId={selectedRunId} embedded />
+          <DataViewer
+            runId={selectedRunId}
+            embedded
+            selectedTable={selectedTable}
+            onSelectTable={setSelectedTable}
+          />
+        )}
+
+        {active === 'edge_cases' && (
+          <EdgeCasePanel
+            runId={selectedRunId}
+            sourceName={selectedSourceName}
+            selectedTable={selectedTable}
+            onSelectTable={setSelectedTable}
+            embedded
+          />
         )}
 
         {active === 'graph' && (
-          <GraphView embedded />
+          <GraphView
+            embedded
+            sourceName={selectedSourceName}
+            runId={selectedRunId}
+            focusTable={selectedTable}
+            onSelectTable={setSelectedTable}
+          />
         )}
 
         {active === 'policies' && (

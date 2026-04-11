@@ -47,6 +47,10 @@ from synthesis.edge_case_engine import EdgeCaseEngine
 from synthesis.dedup_registry import DedupEngine
 from synthesis.structural_generator import StructuralColumnGenerator
 from synthesis.table_profile import build_generation_profile
+from synthesis.production_defect_detector import (
+    ProductionDefectDetector,
+    reports_to_api_payload,
+)
 
 # Layer 4 — Validation
 from synthesis.data_validator import DataValidator
@@ -835,6 +839,61 @@ class PipelineOrchestrator:
                 edge_case_coverage=edge_case_coverage,
                 domains=domains_list
             )
+
+            # ------------------------------------------------------------
+            # Phase 7.5: Production Defect Detector (real scan of source DB)
+            # ------------------------------------------------------------
+            # Scan the live source database for rows that real production
+            # code would reject — bad emails, overflowing amounts, dangling
+            # FKs, invalid dates, etc. No mutation, no synthesis: every
+            # defect row returned is an actual row that exists in the source
+            # database, with its actual primary key and actual bad value.
+            try:
+                defect_detector = ProductionDefectDetector()
+                defect_reports = defect_detector.detect(
+                    engine=connector.engine,
+                    relationships=all_rels,
+                    table_filter=table_filter,
+                )
+                payload = reports_to_api_payload(
+                    defect_reports,
+                    run_id=self.run_id,
+                    source_name=self.source_name,
+                )
+
+                import json as _json
+                from pathlib import Path as _Path
+
+                defect_path = _Path(manifest.output_path) / "production_defects.json"
+                defect_path.parent.mkdir(parents=True, exist_ok=True)
+                defect_path.write_text(_json.dumps(payload, indent=2, default=str))
+
+                self._log_phase_event(
+                    PHASE_VALIDATION,
+                    "production_defect_detection",
+                    f"Detected {payload['total_defects']} real defect rows in the source "
+                    f"database across {len(payload['tables'])} tables.",
+                    status="completed",
+                    llm_insight=(
+                        "Scanned the real source database with the production validator "
+                        "catalog — bad emails, overflow amounts, dangling FKs, invalid dates. "
+                        "Every row surfaced here is an actual row from the source DB."
+                    ),
+                    details={
+                        "total_defects": payload["total_defects"],
+                        "tables": [t["table_name"] for t in payload["tables"]],
+                        "report_path": str(defect_path),
+                    },
+                )
+            except Exception as defect_exc:
+                logger.warning("Production defect detection failed: %s", defect_exc)
+                self._log_phase_event(
+                    PHASE_VALIDATION,
+                    "production_defect_detection",
+                    "Production defect detector failed.",
+                    status="failed",
+                    details={"error": str(defect_exc)[:300]},
+                )
 
             # Update run log
             with self.db_client.session() as session:

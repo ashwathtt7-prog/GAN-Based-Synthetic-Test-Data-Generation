@@ -12,7 +12,7 @@ llm:
   structured_output: true               # enforce JSON schema on every call
   retry_max: 3                          # max retries on validation failure
   confidence_threshold: 0.6             # below this → human review queue
-  service_account_path: "service-account.json"
+  service_account_path: "../service-account.json"
 
 # === Database Configuration ===
 database:
@@ -29,22 +29,45 @@ neo4j:
   database: "neo4j"
 
 # === Data Source Configuration ===
+# Three telecom-style sources sitting on three different backends so the
+# demo can prove that the rule-based pipeline is backend-agnostic.
+#   1. SQLite OLTP           -> datasets/telecom_source.db
+#   2. DuckDB warehouse      -> datasets/telecom_dw.duckdb
+#   3. DuckDB parquet lake   -> datasets/telecom_lake.duckdb (views over Parquet)
+# Plus a tiny retail demo DB for the mini live demo.
 data_sources:
-  # For POC: local SQLite databases with seed data
-  # For production: JDBC connection strings to Oracle/PostgreSQL/MySQL
-  - name: "telecom_poc"
-    label: "Telecom Full Demo"
-    description: "22-table telecom source with customer, billing, and network domains."
+  - name: "telecom_sqlite"
+    label: "Telecom OLTP (SQLite)"
+    description: "22-table telecom schema served from a SQLite OLTP file."
     default: true
     type: "sqlite"
-    connection_string: "sqlite:///./datasets/telecom_source_seed.db"
+    connection_string: "sqlite:///./datasets/telecom_source.db"
     dialect: "sqlite"
+    backend: "SQLite file (row store, OLTP)"
+
+  - name: "telecom_duckdb_dw"
+    label: "Telecom Warehouse (DuckDB)"
+    description: "Same 22-table telecom schema loaded into a DuckDB analytical warehouse file."
+    type: "duckdb"
+    connection_string: "duckdb:///./datasets/telecom_dw.duckdb"
+    dialect: "duckdb"
+    backend: "DuckDB file (columnar OLAP warehouse)"
+
+  - name: "telecom_parquet_lake"
+    label: "Telecom Parquet Lake (DuckDB)"
+    description: "22 telecom tables exposed as DuckDB tables backed by Parquet files on disk."
+    type: "duckdb"
+    connection_string: "duckdb:///./datasets/telecom_lake.duckdb"
+    dialect: "duckdb"
+    backend: "Parquet files served through DuckDB (data-lake / lakehouse pattern)"
+
   - name: "demo_showcase"
     label: "Retail Mini Demo"
-    description: "4-table relational demo with customers, products, orders, and order items."
+    description: "4-table retail relational demo with customers, products, orders, and order items."
     type: "sqlite"
     connection_string: "sqlite:///./datasets/demo_showcase.db"
     dialect: "sqlite"
+    backend: "SQLite file (row store, small demo)"
 
 # === Schema Ingestion ===
 ingestion:

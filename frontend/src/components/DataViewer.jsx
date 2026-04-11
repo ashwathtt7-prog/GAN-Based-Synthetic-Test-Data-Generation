@@ -5,9 +5,26 @@ import { ArrowLeftRight, ChevronDown, RefreshCw, Table2, X } from 'lucide-react'
 const API_BASE = "http://localhost:8001/api";
 const EMPTY_DATA = { rows: [], columns: [] };
 
-const DataViewer = ({ onClose, runId = null, embedded = false }) => {
+const DataViewer = ({
+  onClose,
+  runId = null,
+  embedded = false,
+  selectedTable: selectedTableProp = null,
+  onSelectTable = null,
+}) => {
   const [tables, setTables] = useState([]);
-  const [selectedTable, setSelectedTable] = useState(null);
+  const [selectedTable, setSelectedTableState] = useState(selectedTableProp);
+  const setSelectedTable = useCallback((tableName) => {
+    setSelectedTableState(tableName);
+    if (onSelectTable) onSelectTable(tableName);
+  }, [onSelectTable]);
+
+  useEffect(() => {
+    if (selectedTableProp && selectedTableProp !== selectedTable) {
+      setSelectedTableState(selectedTableProp);
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [selectedTableProp]);
   const [syntheticData, setSyntheticData] = useState(EMPTY_DATA);
   const [sourceData, setSourceData] = useState(EMPTY_DATA);
   const [view, setView] = useState('sideBySide');

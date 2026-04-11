@@ -37,7 +37,10 @@ class ColumnPolicy(Base):
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
 
     __table_args__ = (
-        UniqueConstraint("table_name", "column_name", name="uq_table_column"),
+        UniqueConstraint(
+            "source_name", "table_name", "column_name",
+            name="uq_source_table_column",
+        ),
     )
 
 
@@ -47,7 +50,7 @@ class GenerationStrategy(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     source_name = Column(String, nullable=True)
-    table_name = Column(String, nullable=False, unique=True)
+    table_name = Column(String, nullable=False)
     domain = Column(String)
     tier_override = Column(String)  # ctgan, tvae, rule_based, hybrid, or None
     temporal_constraints = Column(JSON)  # [{earlier_column, later_column}]
@@ -55,6 +58,13 @@ class GenerationStrategy(Base):
     edge_case_injection_pct = Column(Float, default=0.05)
     notes = Column(Text)
     created_at = Column(DateTime, default=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_name", "table_name",
+            name="uq_strategy_source_table",
+        ),
+    )
 
 
 class BoundaryKeyRegistry(Base):
@@ -107,12 +117,19 @@ class TableMetadataRecord(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     source_name = Column(String, nullable=True)
-    table_name = Column(String, nullable=False, unique=True)
+    table_name = Column(String, nullable=False)
     row_count = Column(Integer, default=0)
     column_count = Column(Integer, default=0)
     domain = Column(String)
     created_at = Column(DateTime, default=datetime.utcnow)
     updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint(
+            "source_name", "table_name",
+            name="uq_metadata_source_table",
+        ),
+    )
 
 
 class PipelineRun(Base):

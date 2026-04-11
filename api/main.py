@@ -318,6 +318,8 @@ def list_data_sources():
             "label": source.get("label", source.get("name")),
             "description": source.get("description"),
             "dialect": source.get("dialect"),
+            "backend": source.get("backend"),
+            "type": source.get("type"),
             "table_count": table_count,
             "is_default": source.get("name") == default_source.get("name"),
         })
@@ -1082,6 +1084,79 @@ def get_source_data(table_name: str, run_id: str | None = None, source_name: str
 
 
 # =====================================================
+# Production Defect Simulation (Edge Cases tab)
+# =====================================================
+
+def _find_run_defect_file(run_id: str | None) -> tuple[Path | None, str | None]:
+    """Locate the production_defects.json file for a given run (or newest)."""
+    output_root = _get_output_root()
+    if not output_root.exists():
+        return None, None
+
+    if run_id:
+        candidate = output_root / run_id / "production_defects.json"
+        if candidate.exists():
+            return candidate, run_id
+        return None, None
+
+    # Fall back to the most recently modified run that has a defect file.
+    run_dirs = sorted(
+        [d for d in output_root.iterdir() if d.is_dir()],
+        key=lambda d: d.stat().st_mtime,
+        reverse=True,
+    )
+    for run_dir in run_dirs:
+        candidate = run_dir / "production_defects.json"
+        if candidate.exists():
+            return candidate, run_dir.name
+    return None, None
+
+
+@app.get("/api/edge-cases/production-defects")
+def get_production_defects(
+    run_id: str | None = None,
+    table_name: str | None = None,
+):
+    """
+    Return the production-defect report for a completed run.
+
+    Each defect captures:
+      - the column + value that would fail in prod
+      - the production validation that would reject it
+      - downstream/child rows affected via declared FKs
+    """
+    defect_file, resolved_run_id = _find_run_defect_file(run_id)
+    if defect_file is None:
+        return {
+            "run_id": run_id,
+            "total_defects": 0,
+            "tables": [],
+            "message": (
+                "No production-defect report available yet. Run the pipeline first — "
+                "the simulator runs right after the delivery phase."
+            ),
+        }
+
+    try:
+        payload = json.loads(defect_file.read_text())
+    except Exception as exc:
+        raise HTTPException(status_code=500, detail=f"Corrupt defect report: {exc}")
+
+    payload["run_id"] = resolved_run_id
+    payload = _json_safe(payload)
+
+    if table_name:
+        payload["tables"] = [
+            t for t in payload.get("tables", [])
+            if t.get("table_name", "").upper() == table_name.upper()
+        ]
+        payload["total_defects"] = sum(
+            t.get("defect_count", 0) for t in payload["tables"]
+        )
+    return payload
+
+
+# =====================================================
 # Pipeline Activity Log
 # =====================================================
 
@@ -1117,52 +1192,156 @@ def get_pipeline_activity_log(run_id: str | None = None):
 # Knowledge Graph Visualization
 # =====================================================
 
-@app.get("/api/graph")
-def get_graph_data():
+def _build_graph_snapshot_for_source(source_name: str | None) -> dict:
     """
-    Return the knowledge graph as nodes + edges for frontend visualization.
-    Nodes are tables (with domain coloring), edges are FK relationships.
+    Build a lightweight graph snapshot directly from the source database + DDL
+    parser, without touching the main in-memory knowledge graph. This lets the
+    frontend show a correct graph for any configured source regardless of which
+    source was most recently run through the pipeline.
+    """
+    from ingestion.schema_connector import SchemaConnector
+    from ingestion.sqlglot_parser import DDLParser
+
+    config = load_config()
+    source = get_data_source(source_name, config)
+    resolved_source = source.get("name")
+
+    connector = SchemaConnector(source["connection_string"])
+    tables = connector.extract_schema()
+
+    ddl_dir = config.get("ingestion", {}).get("ddl_directory", "datasets/ddl")
+    ddl_parser = DDLParser(ddl_dir)
+    all_rels = ddl_parser.parse_relationships()
+
+    table_name_set = {t.table_name.upper() for t in tables}
+    relevant_rels = [
+        r for r in all_rels
+        if r.source_table.upper() in table_name_set and r.target_table.upper() in table_name_set
+    ]
+
+    # Pull persisted domain / PII information where available.
+    domain_map: dict[str, str] = {}
+    pii_counts: dict[str, int] = {}
+    try:
+        with db_client.session() as session:
+            meta_query = session.query(db_models.TableMetadataRecord)
+            policy_query = session.query(db_models.ColumnPolicy)
+            if resolved_source is not None:
+                meta_query = meta_query.filter_by(source_name=resolved_source)
+                policy_query = policy_query.filter_by(source_name=resolved_source)
+            for record in meta_query.all():
+                if record.domain:
+                    domain_map[record.table_name] = record.domain
+            for policy in policy_query.all():
+                if policy.pii_classification and policy.pii_classification not in ("none", "not_pii"):
+                    pii_counts[policy.table_name] = pii_counts.get(policy.table_name, 0) + 1
+    except Exception as exc:
+        logger.warning(f"Failed to load persisted graph metadata for source {resolved_source}: {exc}")
+
+    def _heuristic_domain(name: str) -> str:
+        upper = name.upper()
+        if any(kw in upper for kw in ("CUST", "SUBSCR", "SVC_PLAN", "ADDR", "CNTCT", "IDENT")):
+            return "customer_management"
+        if any(kw in upper for kw in ("BLNG", "INVC", "PYMT", "USAGE", "CDR", "ORDER", "ORD", "PRICE", "PAYMENT")):
+            return "billing_revenue"
+        if any(kw in upper for kw in ("NTWK", "CELL", "WRK_ORD", "INCDT", "FIELD", "AGT", "PROD", "PRODUCT")):
+            return "network_operations"
+        return "general"
+
+    nodes = []
+    for table in tables:
+        name = table.table_name
+        nodes.append({
+            "id": name,
+            "label": name,
+            "domain": domain_map.get(name) or _heuristic_domain(name),
+            "row_count": table.row_count or 0,
+            "column_count": table.column_count or 0,
+            "pii_columns": pii_counts.get(name, 0),
+        })
+
+    edges = []
+    for rel in relevant_rels:
+        edges.append({
+            "source": rel.source_table,
+            "target": rel.target_table,
+            "source_column": rel.source_column,
+            "target_column": rel.target_column,
+            "relationship_type": getattr(rel, "relationship_type", "FK") or "FK",
+        })
+
+    return {"source_name": resolved_source, "nodes": nodes, "edges": edges}
+
+
+def _filter_graph_to_focus(graph: dict, focus_table: str | None, hops: int = 1) -> dict:
+    """Restrict a graph snapshot to a focus table and its N-hop neighbors."""
+    if not focus_table:
+        return graph
+
+    nodes = graph.get("nodes", [])
+    edges = graph.get("edges", [])
+
+    node_index = {n["id"]: n for n in nodes}
+    if focus_table not in node_index:
+        # Case-insensitive match for convenience.
+        match = next((n for n in nodes if n["id"].upper() == focus_table.upper()), None)
+        if not match:
+            return {"source_name": graph.get("source_name"), "nodes": [], "edges": [], "focus_table": focus_table}
+        focus_table = match["id"]
+
+    adjacency: dict[str, set[str]] = {}
+    for edge in edges:
+        adjacency.setdefault(edge["source"], set()).add(edge["target"])
+        adjacency.setdefault(edge["target"], set()).add(edge["source"])
+
+    visited = {focus_table}
+    frontier = {focus_table}
+    for _ in range(max(hops, 0)):
+        next_frontier = set()
+        for node in frontier:
+            for neighbor in adjacency.get(node, set()):
+                if neighbor not in visited:
+                    next_frontier.add(neighbor)
+        visited.update(next_frontier)
+        frontier = next_frontier
+
+    kept_nodes = [dict(n, _focused=(n["id"] == focus_table)) for n in nodes if n["id"] in visited]
+    kept_edges = [e for e in edges if e["source"] in visited and e["target"] in visited]
+    return {
+        "source_name": graph.get("source_name"),
+        "nodes": kept_nodes,
+        "edges": kept_edges,
+        "focus_table": focus_table,
+    }
+
+
+@app.get("/api/graph")
+def get_graph_data(
+    source_name: str | None = None,
+    run_id: str | None = None,
+    focus_table: str | None = None,
+    hops: int = 1,
+):
+    """
+    Return a graph snapshot (nodes + edges) for the requested source.
+
+    - If ``run_id`` is supplied, the snapshot resolves to that run's source.
+    - If ``source_name`` is supplied, the snapshot is built from that source.
+    - If neither is given, the default source from config.yaml is used.
+    - ``focus_table`` restricts the snapshot to that table plus ``hops``-hop neighbors.
     """
     try:
-        from graph.knowledge_graph import get_knowledge_graph
-        kg = get_knowledge_graph()
+        resolved_source = source_name
+        if run_id and not resolved_source:
+            with db_client.session() as session:
+                resolved_source = _get_run_source_name(session, run_id)
 
-        nodes = []
-        edges = []
-
-        for node_id, data in kg.G.nodes(data=True):
-            if data.get("node_type") == "table":
-                # Count columns for this table
-                col_count = sum(1 for _, _, ed in kg.G.out_edges(node_id, data=True)
-                                if ed.get("edge_type") == "HAS_COLUMN")
-                # Count PII columns
-                pii_count = sum(1 for _, tgt, ed in kg.G.out_edges(node_id, data=True)
-                                if ed.get("edge_type") == "HAS_COLUMN"
-                                and kg.G.nodes[tgt].get("pii_classification") not in (None, "none", "not_pii"))
-
-                nodes.append({
-                    "id": data["name"],
-                    "label": data["name"],
-                    "domain": data.get("domain", "unknown"),
-                    "row_count": data.get("row_count", 0),
-                    "column_count": col_count,
-                    "pii_columns": pii_count,
-                })
-
-        for src, tgt, data in kg.G.edges(data=True):
-            if data.get("edge_type") == "RELATES_TO":
-                src_name = kg.G.nodes[src].get("name")
-                tgt_name = kg.G.nodes[tgt].get("name")
-                edges.append({
-                    "source": src_name,
-                    "target": tgt_name,
-                    "source_column": data.get("source_column"),
-                    "target_column": data.get("target_column"),
-                    "relationship_type": data.get("relationship_type", "FK"),
-                })
-
-        return {"nodes": nodes, "edges": edges}
+        snapshot = _build_graph_snapshot_for_source(resolved_source)
+        if focus_table:
+            snapshot = _filter_graph_to_focus(snapshot, focus_table, hops=hops)
+        return snapshot
     except Exception as e:
+        logger.exception("Failed to build graph snapshot")
         return {"nodes": [], "edges": [], "error": str(e)}
 
 

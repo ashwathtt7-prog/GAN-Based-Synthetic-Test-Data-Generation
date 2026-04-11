@@ -1,7 +1,7 @@
-import React, { useState, useEffect, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import axios from 'axios';
-import { Maximize2, X } from 'lucide-react';
+import { Maximize2, X, Focus } from 'lucide-react';
 
 const API_BASE = "http://localhost:8001/api";
 
@@ -13,23 +13,64 @@ const DOMAIN_COLORS = {
   unknown: '#64748b',
 };
 
-const GraphView = ({ onClose, embedded = false }) => {
+const GraphView = ({
+  onClose,
+  embedded = false,
+  sourceName = null,
+  runId = null,
+  focusTable = null,
+  onSelectTable = null,
+}) => {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [selectedNode, setSelectedNode] = useState(null);
   const [tableDetail, setTableDetail] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [focusMode, setFocusMode] = useState(Boolean(focusTable));
+  const [hops, setHops] = useState(1);
+  const [containerSize, setContainerSize] = useState({ width: 600, height: 500 });
+  const [error, setError] = useState('');
   const fgRef = useRef();
+  const containerRef = useRef(null);
 
+  // Track container size so ForceGraph2D receives explicit dimensions,
+  // which prevents the "invisible graph" issue on large datasets where
+  // the canvas auto-sizes to 0 during the first paint.
   useEffect(() => {
-    fetchGraph();
+    if (!containerRef.current) return;
+    const observer = new ResizeObserver((entries) => {
+      for (const entry of entries) {
+        const { width, height } = entry.contentRect;
+        if (width > 0 && height > 0) {
+          setContainerSize({ width, height });
+        }
+      }
+    });
+    observer.observe(containerRef.current);
+    return () => observer.disconnect();
   }, []);
 
-  const fetchGraph = async () => {
-    try {
-      const res = await axios.get(`${API_BASE}/graph`);
-      const { nodes, edges } = res.data;
+  useEffect(() => {
+    setFocusMode(Boolean(focusTable));
+  }, [focusTable]);
 
-      const graphNodes = nodes.map(n => ({
+  const fetchGraph = useCallback(async () => {
+    setLoading(true);
+    setError('');
+    try {
+      const params = {};
+      if (sourceName) params.source_name = sourceName;
+      if (runId) params.run_id = runId;
+      if (focusMode && focusTable) {
+        params.focus_table = focusTable;
+        params.hops = hops;
+      }
+      const res = await axios.get(`${API_BASE}/graph`, { params });
+      const { nodes = [], edges = [], error: apiError } = res.data || {};
+      if (apiError) {
+        setError(apiError);
+      }
+
+      const graphNodes = nodes.map((n) => ({
         id: n.id,
         label: n.label,
         domain: n.domain,
@@ -37,10 +78,11 @@ const GraphView = ({ onClose, embedded = false }) => {
         column_count: n.column_count,
         pii_columns: n.pii_columns,
         color: DOMAIN_COLORS[n.domain] || DOMAIN_COLORS.unknown,
-        val: Math.max(3, Math.log10(Math.max(n.row_count, 1)) * 3),
+        val: Math.max(4, Math.min(20, Math.log10(Math.max(n.row_count || 0, 1) + 1) * 4 + 4)),
+        _focused: Boolean(n._focused),
       }));
 
-      const graphLinks = edges.map(e => ({
+      const graphLinks = edges.map((e) => ({
         source: e.source,
         target: e.target,
         source_column: e.source_column,
@@ -51,25 +93,49 @@ const GraphView = ({ onClose, embedded = false }) => {
       setGraphData({ nodes: graphNodes, links: graphLinks });
     } catch (err) {
       console.error("Failed to fetch graph", err);
+      setError('Could not load graph data.');
     } finally {
       setLoading(false);
     }
-  };
+  }, [sourceName, runId, focusMode, focusTable, hops]);
+
+  useEffect(() => {
+    fetchGraph();
+  }, [fetchGraph]);
+
+  // Fit the graph to view once the simulation settles. Uses a safe timeout
+  // fallback for large graphs where onEngineStop may fire before the canvas
+  // has a chance to lay out.
+  useEffect(() => {
+    if (!graphData.nodes.length) return;
+    const timer = setTimeout(() => {
+      try {
+        fgRef.current?.zoomToFit(500, 60);
+      } catch (err) {
+        // ignore – fitting can briefly fail during rapid remounts
+      }
+    }, 450);
+    return () => clearTimeout(timer);
+  }, [graphData]);
 
   const handleNodeClick = useCallback(async (node) => {
     setSelectedNode(node);
+    if (onSelectTable) {
+      onSelectTable(node.id);
+    }
     try {
       const res = await axios.get(`${API_BASE}/graph/table/${node.id}`);
       setTableDetail(res.data);
     } catch (err) {
       console.error("Failed to fetch table detail", err);
+      setTableDetail(null);
     }
-  }, []);
+  }, [onSelectTable]);
 
   const paintNode = useCallback((node, ctx, globalScale) => {
     const label = node.label;
     const fontSize = Math.max(10 / globalScale, 2);
-    const nodeRadius = node.val + 2;
+    const nodeRadius = (node.val || 5) + 2;
 
     ctx.beginPath();
     ctx.arc(node.x, node.y, nodeRadius, 0, 2 * Math.PI);
@@ -77,9 +143,9 @@ const GraphView = ({ onClose, embedded = false }) => {
     ctx.fill();
 
     ctx.shadowColor = node.color;
-    ctx.shadowBlur = 8;
-    ctx.strokeStyle = 'rgba(255,255,255,0.3)';
-    ctx.lineWidth = 0.5;
+    ctx.shadowBlur = node._focused ? 16 : 8;
+    ctx.strokeStyle = node._focused ? '#facc15' : 'rgba(255,255,255,0.35)';
+    ctx.lineWidth = node._focused ? 2.5 : 0.5;
     ctx.stroke();
     ctx.shadowBlur = 0;
 
@@ -99,21 +165,27 @@ const GraphView = ({ onClose, embedded = false }) => {
   }, [selectedNode]);
 
   const paintLink = useCallback((link, ctx) => {
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.35)';
+    const sx = link.source?.x;
+    const sy = link.source?.y;
+    const tx = link.target?.x;
+    const ty = link.target?.y;
+    if ([sx, sy, tx, ty].some((v) => v == null || Number.isNaN(v))) return;
+
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
     ctx.lineWidth = 1;
     ctx.beginPath();
-    ctx.moveTo(link.source.x, link.source.y);
-    ctx.lineTo(link.target.x, link.target.y);
+    ctx.moveTo(sx, sy);
+    ctx.lineTo(tx, ty);
     ctx.stroke();
 
-    const dx = link.target.x - link.source.x;
-    const dy = link.target.y - link.source.y;
+    const dx = tx - sx;
+    const dy = ty - sy;
     const angle = Math.atan2(dy, dx);
-    const targetR = (link.target.val || 5) + 4;
-    const arrowX = link.target.x - Math.cos(angle) * targetR;
-    const arrowY = link.target.y - Math.sin(angle) * targetR;
+    const targetR = (link.target?.val || 5) + 4;
+    const arrowX = tx - Math.cos(angle) * targetR;
+    const arrowY = ty - Math.sin(angle) * targetR;
 
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.6)';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.75)';
     ctx.beginPath();
     ctx.moveTo(arrowX, arrowY);
     ctx.lineTo(
@@ -127,17 +199,53 @@ const GraphView = ({ onClose, embedded = false }) => {
     ctx.fill();
   }, []);
 
+  const subtitleParts = useMemo(() => {
+    const parts = [];
+    parts.push(`${graphData.nodes.length} tables`);
+    parts.push(`${graphData.links.length} relationships`);
+    if (sourceName) parts.push(`source: ${sourceName}`);
+    if (focusMode && focusTable) parts.push(`focus: ${focusTable}`);
+    return parts.join(' | ');
+  }, [graphData, sourceName, focusMode, focusTable]);
+
   const panel = (
     <div className="flex h-full flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm">
-      <div className="flex justify-between items-center p-5 border-b border-slate-200">
+      <div className="flex flex-wrap justify-between items-center gap-3 p-5 border-b border-slate-200">
         <div>
           <h2 className="text-xl font-semibold text-slate-900">Knowledge Graph</h2>
-          <p className="text-sm text-slate-500">
-            {graphData.nodes.length} tables, {graphData.links.length} relationships
-          </p>
+          <p className="text-sm text-slate-500">{subtitleParts}</p>
         </div>
 
-        <div className="flex items-center gap-4">
+        <div className="flex items-center gap-3 flex-wrap">
+          {focusTable && (
+            <button
+              onClick={() => setFocusMode((value) => !value)}
+              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
+                focusMode
+                  ? 'bg-amber-100 text-amber-800 border-amber-200'
+                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
+              }`}
+              title="Toggle focus-on-selected-table subgraph"
+            >
+              <Focus size={14} />
+              {focusMode ? `Focus: ${focusTable}` : 'Show full graph'}
+            </button>
+          )}
+          {focusMode && (
+            <label className="flex items-center gap-2 text-xs text-slate-500">
+              Hops
+              <select
+                value={hops}
+                onChange={(e) => setHops(Number(e.target.value))}
+                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs"
+              >
+                <option value={1}>1</option>
+                <option value={2}>2</option>
+                <option value={3}>3</option>
+              </select>
+            </label>
+          )}
+
           <div className="hidden flex-wrap gap-3 text-xs text-slate-500 xl:flex">
             {Object.entries(DOMAIN_COLORS).filter(([k]) => k !== 'unknown').map(([domain, color]) => (
               <span key={domain} className="flex items-center gap-1">
@@ -148,7 +256,7 @@ const GraphView = ({ onClose, embedded = false }) => {
           </div>
 
           <div className="flex gap-2">
-            <button onClick={() => fgRef.current?.zoomToFit(400, 40)}
+            <button onClick={() => fgRef.current?.zoomToFit(400, 60)}
                     className="p-2 rounded-lg border border-slate-200 hover:bg-slate-100" title="Fit to view">
               <Maximize2 size={16} />
             </button>
@@ -162,34 +270,46 @@ const GraphView = ({ onClose, embedded = false }) => {
         </div>
       </div>
 
-      <div className="flex-1 flex">
-        <div className="flex-1 relative bg-[#0b1020]">
+      <div className="flex-1 flex min-h-[400px]">
+        <div
+          ref={containerRef}
+          className="flex-1 relative bg-[#0b1020] min-h-[400px]"
+        >
           {loading ? (
             <div className="flex items-center justify-center h-full text-slate-300">
               Loading graph...
             </div>
           ) : graphData.nodes.length === 0 ? (
-            <div className="flex items-center justify-center h-full text-slate-400">
-              No graph data yet. Run the pipeline first to build the knowledge graph.
+            <div className="flex items-center justify-center h-full text-slate-400 p-6 text-center">
+              {error || 'No graph data for this source yet. Run the pipeline first.'}
             </div>
           ) : (
             <ForceGraph2D
               ref={fgRef}
+              width={containerSize.width}
+              height={containerSize.height}
               graphData={graphData}
               nodeCanvasObject={paintNode}
               linkCanvasObject={paintLink}
               onNodeClick={handleNodeClick}
               nodePointerAreaPaint={(node, color, ctx) => {
                 ctx.beginPath();
-                ctx.arc(node.x, node.y, node.val + 5, 0, 2 * Math.PI);
+                ctx.arc(node.x, node.y, (node.val || 5) + 5, 0, 2 * Math.PI);
                 ctx.fillStyle = color;
                 ctx.fill();
               }}
               backgroundColor="#0b1020"
-              cooldownTicks={100}
+              cooldownTicks={Math.min(200, Math.max(80, graphData.nodes.length * 4))}
               linkDirectionalArrowLength={0}
-              d3VelocityDecay={0.3}
-              onEngineStop={() => fgRef.current?.zoomToFit(400, 60)}
+              d3VelocityDecay={0.35}
+              warmupTicks={20}
+              onEngineStop={() => {
+                try {
+                  fgRef.current?.zoomToFit(400, 60);
+                } catch (err) {
+                  // ignore
+                }
+              }}
             />
           )}
         </div>
