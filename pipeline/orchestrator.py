@@ -9,10 +9,12 @@ Supports crash recovery via generation_run_log.
 """
 
 import ast
+from concurrent.futures import ThreadPoolExecutor, as_completed
 import logging
 import os
 import re
 import time
+from threading import Lock
 
 for env_var in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
     os.environ.setdefault(env_var, "1")
@@ -21,7 +23,7 @@ import uuid
 import pandas as pd
 from datetime import datetime
 
-from config.config import load_config
+from config.config import get_data_source, load_config
 
 # Layer 1 — Ingestion
 from ingestion.schema_connector import SchemaConnector
@@ -39,12 +41,8 @@ from intelligence.strategy_planner import StrategyPlanner
 from intelligence.failure_diagnosis import FailureDiagnosisAgent
 
 # Layer 3 — Synthesis
-from synthesis.tier_router import TierRouter
 from synthesis.masking_engine import MaskingEngine
-from synthesis.ctgan_model import CTGANModel
-from synthesis.tvae_model import TVAEModel
 from synthesis.rule_based_generator import RuleBasedGenerator
-from synthesis.junction_handler import JunctionHandler
 from synthesis.edge_case_engine import EdgeCaseEngine
 from synthesis.dedup_registry import DedupEngine
 from synthesis.structural_generator import StructuralColumnGenerator
@@ -63,6 +61,12 @@ from models.schemas import ColumnPolicySchema
 
 logger = logging.getLogger(__name__)
 
+PHASE_SCHEMA = "schema_analysis"
+PHASE_REASONING = "policy_reasoning"
+PHASE_PLANNING = "rule_planning"
+PHASE_GENERATION = "rule_generation"
+PHASE_VALIDATION = "validation_delivery"
+
 
 class PipelineOrchestrator:
     def __init__(self):
@@ -70,6 +74,8 @@ class PipelineOrchestrator:
         self.db_client = DatabaseClient()
         self.db_client.initialize()
         self.run_id = None
+        self.source_name = None
+        self.source_config = None
 
         # Track generated data for cross-table FK stitching
         self.generated_data = {}       # {table_name: DataFrame}
@@ -77,9 +83,12 @@ class PipelineOrchestrator:
         self.strategies_cache = {}     # {table_name: GenerationStrategySchema}
         self.table_profiles_cache = {}   # {table_name: TableGenerationProfile}
         self.generated_tiers = {}       # {table_name: str}
+        self._presidio_scan_lock = Lock()
 
-    def initialize_run(self, table_filter: list[str] = None, fast_mode: bool = False) -> str:
+    def initialize_run(self, table_filter: list[str] = None, fast_mode: bool = False, source_name: str | None = None) -> str:
         self.run_id = str(uuid.uuid4())
+        self.source_config = get_data_source(source_name, self.config)
+        self.source_name = self.source_config["name"]
         self.generated_data = {}
         self.column_policies_cache = {}
         self.strategies_cache = {}
@@ -88,6 +97,7 @@ class PipelineOrchestrator:
         with self.db_client.session() as session:
             run = db_models.PipelineRun(
                 run_id=self.run_id,
+                source_name=self.source_name,
                 status="initialized",
                 current_step="Starting",
                 table_filter=table_filter,
@@ -115,6 +125,7 @@ class PipelineOrchestrator:
             with self.db_client.session() as session:
                 log = db_models.PipelineStepLog(
                     run_id=self.run_id,
+                    source_name=self.source_name,
                     step_name=step_name,
                     table_name=table_name,
                     domain=domain,
@@ -128,7 +139,59 @@ class PipelineOrchestrator:
         except Exception as e:
             logger.debug(f"Failed to log step {step_name}: {e}")
 
-    def execute_pipeline(self, run_id: str, table_filter: list[str] = None, fast_mode: bool = False):
+    def _log_phase_event(
+        self,
+        phase_id: str,
+        step_name: str,
+        message: str,
+        table_name: str = None,
+        domain: str = None,
+        status: str = "completed",
+        llm_insight: str | None = None,
+        details: dict | None = None,
+        duration: float | None = None,
+    ):
+        """Attach phase metadata and human-readable messaging to a step log entry."""
+        payload = dict(details or {})
+        payload.setdefault("phase_id", phase_id)
+        payload.setdefault("message", message)
+        if llm_insight:
+            payload.setdefault("llm_insight", llm_insight)
+        self._log_step(
+            step_name,
+            table_name=table_name,
+            domain=domain,
+            status=status,
+            details=payload,
+            duration=duration,
+        )
+
+    def _build_strategy_insight(self, strategy) -> str:
+        """Summarize the LLM-backed rule plan in one compact sentence."""
+        if not strategy:
+            return "Rule-based generation will follow the approved column constraints."
+
+        notes = (getattr(strategy, "notes", None) or "").strip()
+        temporal_constraints = getattr(strategy, "temporal_constraints", None) or []
+        post_rules = getattr(strategy, "post_generation_rules", None) or []
+
+        parts = []
+        if notes:
+            parts.append(notes)
+        if temporal_constraints:
+            parts.append(f"{len(temporal_constraints)} temporal guardrail(s) will be enforced.")
+        if post_rules:
+            parts.append(f"{len(post_rules)} post-generation business rule(s) will be checked.")
+
+        return " ".join(parts) or "Rule-based generation will follow the approved column constraints."
+
+    def execute_pipeline(
+        self,
+        run_id: str,
+        table_filter: list[str] = None,
+        fast_mode: bool = False,
+        source_name: str | None = None,
+    ):
         """
         Execute the full 4-layer pipeline.
 
@@ -140,14 +203,25 @@ class PipelineOrchestrator:
         self.run_id = run_id
         try:
             smoke_test_mode = bool(fast_mode)
+            with self.db_client.session() as session:
+                run = session.query(db_models.PipelineRun).filter_by(run_id=run_id).first()
+                resolved_source_name = source_name or (run.source_name if run else None)
+            self.source_config = get_data_source(resolved_source_name, self.config)
+            self.source_name = self.source_config["name"]
             # ================================================================
             # Phase 1: Schema Ingestion (Step 1.1 - 1.3)
             # ================================================================
             self._update_status("Schema Ingestion", 2.0)
             logger.info("=== Phase 1: Schema Ingestion ===")
 
-            self._log_step("schema_ingestion", status="running", details={"phase": "starting"})
-            source_url = self.config['data_sources'][0]['connection_string']
+            self._log_phase_event(
+                PHASE_SCHEMA,
+                "schema_ingestion",
+                "Connecting to the source systems and reading table metadata.",
+                status="running",
+                details={"phase": "starting"},
+            )
+            source_url = self.source_config['connection_string']
             connector = SchemaConnector(source_url)
             tables = connector.extract_schema()
 
@@ -161,8 +235,13 @@ class PipelineOrchestrator:
 
             all_rels = explicit_rels + implicit_rels
             logger.info(f"Extracted {len(tables)} tables, {len(all_rels)} relationships")
-            self._log_step("schema_ingestion", status="completed",
-                          details={"tables": len(tables), "relationships": len(all_rels)})
+            self._log_phase_event(
+                PHASE_SCHEMA,
+                "schema_ingestion",
+                f"Schema extraction finished with {len(tables)} tables and {len(all_rels)} relationships.",
+                status="completed",
+                details={"tables": len(tables), "relationships": len(all_rels)},
+            )
 
             # Apply table filter if provided (for small-table testing)
             if table_filter:
@@ -181,8 +260,13 @@ class PipelineOrchestrator:
 
             kg = get_knowledge_graph()
             kg.build_graph(tables, all_rels)
-            self._log_step("knowledge_graph_build", status="completed",
-                          details={"tables": len(tables), "relationships": len(all_rels)})
+            self._log_phase_event(
+                PHASE_SCHEMA,
+                "knowledge_graph_build",
+                "Knowledge graph refreshed so downstream reasoning can use table context and lineage.",
+                status="completed",
+                details={"tables": len(tables), "relationships": len(all_rels)},
+            )
 
             # ================================================================
             # Phase 3: Domain Partitioning (Louvain on knowledge graph)
@@ -196,8 +280,13 @@ class PipelineOrchestrator:
                 logger.warning(f"Louvain partitioning failed, using heuristic: {e}")
                 domain_map = {}
 
-            self._log_step("domain_partitioning", status="completed",
-                          details={"domains": list(set(domain_map.values())) if domain_map else []})
+            self._log_phase_event(
+                PHASE_SCHEMA,
+                "domain_partitioning",
+                "Domain boundaries were mapped to organize the generation run.",
+                status="completed",
+                details={"domains": list(set(domain_map.values())) if domain_map else []},
+            )
             # Fallback heuristic domain assignment if partitioning returned empty
             if not domain_map:
                 for t in tables:
@@ -214,9 +303,15 @@ class PipelineOrchestrator:
             # Cache table metadata in operational DB
             with self.db_client.session() as session:
                 for t in tables:
-                    t_meta = session.query(db_models.TableMetadataRecord).filter_by(table_name=t.table_name).first()
+                    t_meta = session.query(db_models.TableMetadataRecord).filter_by(
+                        source_name=self.source_name,
+                        table_name=t.table_name,
+                    ).first()
                     if not t_meta:
-                        t_meta = db_models.TableMetadataRecord(table_name=t.table_name)
+                        t_meta = db_models.TableMetadataRecord(
+                            source_name=self.source_name,
+                            table_name=t.table_name,
+                        )
                         session.add(t_meta)
                     t_meta.row_count = t.row_count
                     t_meta.column_count = t.column_count
@@ -226,7 +321,7 @@ class PipelineOrchestrator:
             # Create generation run log
             domains_list = list(set(domain_map.values()))
             with self.db_client.session() as session:
-                self.db_client.create_run_log(session, self.run_id, domains_list)
+                self.db_client.create_run_log(session, self.run_id, domains_list, source_name=self.source_name)
 
             # ================================================================
             # Phase 4: Intelligence & Semantic Reasoning (Layer 2)
@@ -235,8 +330,6 @@ class PipelineOrchestrator:
             logger.info("=== Phase 4: Intelligence ===")
 
             presidio = PresidioScanner(self.config)
-            abbrev = AbbreviationResolver()
-            agent = LLMAgent()
             planner = StrategyPlanner()
             confidence_threshold = self.config['llm'].get('confidence_threshold', 0.6)
 
@@ -247,102 +340,124 @@ class PipelineOrchestrator:
                 logger.info(f"Processing table {i+1}/{total_tables}: {table.table_name}")
 
                 cached_policies = self._load_existing_policies(table.table_name)
-                table_policies = []
+                table_policies_by_column = {}
+                pending_columns = []
+                total_columns = max(len(table.columns), 1)
+                completed_columns = 0
                 for col in table.columns:
                     cached_policy = cached_policies.get(col.column_name)
                     if cached_policy:
-                        table_policies.append(cached_policy)
+                        table_policies_by_column[col.column_name] = cached_policy
+                        completed_columns += 1
                         self._log_step(
                             "policy_cache_hit",
                             table_name=table.table_name,
                             status="completed",
-                            details={"column": col.column_name},
+                            details={
+                                "phase_id": PHASE_REASONING,
+                                "column": col.column_name,
+                                "message": f"Reused a previously approved policy for {table.table_name}.{col.column_name}.",
+                                "llm_insight": "Cached reasoning was reused to keep this run deterministic and consistent.",
+                            },
                         )
                         continue
+                    pending_columns.append(col)
 
-                    # Step 2.3: Abbreviation Resolution
-                    try:
-                        exp_name, fully_resolved = abbrev.resolve_column_name(col.column_name)
-                    except Exception:
-                        exp_name = col.column_name
-                        fully_resolved = False
-
-                    # Step 2.1: Presidio PII Scan
-                    try:
-                        sample_vals = self._get_column_sample(connector, table.table_name, col.column_name)
-                    except Exception:
-                        sample_vals = []
-
-                    pres_result = presidio.scan_column(table.table_name, col.column_name, sample_vals)
-
-                    # Master prompt rule: Presidio-flagged columns bypass LLM entirely
-                    if pres_result.pii_detected and pres_result.confidence >= self.config['presidio'].get('confidence_threshold', 0.7):
-                        masking_strategy = presidio.is_pii_passthrough(pres_result.pii_type)
-                        policy = ColumnPolicySchema(
-                            column_name=col.column_name,
-                            table_name=table.table_name,
-                            pii_classification="sensitive_business",
-                            sensitivity_reason=f"Presidio detected {pres_result.pii_type} (conf={pres_result.confidence})",
-                            masking_strategy=masking_strategy,
-                            constraint_profile={},
-                            business_importance="important",
-                            edge_case_flags=[],
-                            dedup_mode="entity",
-                            llm_confidence=1.0,
-                            abbreviation_resolved=fully_resolved,
-                            notes=f"Auto-classified by Presidio. PII type: {pres_result.pii_type}"
-                        )
-                        # Save with pii_source = "presidio"
-                        self._save_column_policy(policy, pii_source="presidio")
-                        table_policies.append(policy)
-                        self._log_step("pii_detection", table_name=table.table_name, status="completed",
-                                      details={"column": col.column_name, "source": "presidio",
-                                               "pii_type": pres_result.pii_type, "masking": masking_strategy})
-                        continue
-
-                    # Step 2.4: LLM Semantic Reasoning (for non-PII or uncertain columns)
-                    policy = agent.classify_column(
+                if pending_columns:
+                    workers = self._get_intelligence_parallel_workers(len(pending_columns))
+                    self._log_phase_event(
+                        PHASE_REASONING,
+                        "parallel_reasoning_start",
+                        f"Analysing {len(pending_columns)} uncached columns for {table.table_name} in parallel across {workers} worker(s).",
                         table_name=table.table_name,
-                        column_name_raw=col.column_name,
-                        column_name_expanded=exp_name,
-                        data_type=col.data_type,
-                        statistical_profile=str(col.model_dump()),
-                        top_values=str(col.top_values),
-                        presidio_result=str(pres_result.model_dump()),
-                        abbreviation_status=str(fully_resolved)
+                        status="running",
+                        llm_insight="Column classification now fans out in parallel, while policy persistence and logs remain coordinated for deterministic playback.",
+                        details={
+                            "pending_columns": len(pending_columns),
+                            "parallel_workers": workers,
+                        },
                     )
+                    future_to_column = {}
+                    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="policy-intel") as executor:
+                        for col in pending_columns:
+                            future = executor.submit(
+                                self._analyze_column_intelligence,
+                                connector,
+                                table.table_name,
+                                col,
+                                presidio,
+                            )
+                            future_to_column[future] = col
 
-                    # Queue low confidence for human review
-                    if policy.llm_confidence < confidence_threshold:
-                        self._queue_for_review(
-                            table.table_name,
-                            col.column_name,
-                            policy,
-                            "Low Confidence Score",
-                            is_blocking=True,
-                        )
+                        for future in as_completed(future_to_column):
+                            col = future_to_column[future]
+                            result = future.result()
+                            completed_columns += 1
+                            progress = 25.0 + ((i + (completed_columns / total_columns)) / total_tables * 35.0)
+                            self._update_status(
+                                f"Classifying {table.table_name} ({completed_columns}/{total_columns} columns)",
+                                progress,
+                            )
 
-                    self._save_column_policy(policy, pii_source="llm")
-                    table_policies.append(policy)
-                    self._log_step("llm_reasoning", table_name=table.table_name, status="completed",
-                                  details={"column": col.column_name, "pii": policy.pii_classification,
-                                           "masking": policy.masking_strategy, "confidence": policy.llm_confidence,
-                                           "reason": (policy.sensitivity_reason or "")[:200]})
+                            policy = result["policy"]
+                            if result["needs_review"]:
+                                self._queue_for_review(
+                                    table.table_name,
+                                    col.column_name,
+                                    policy,
+                                    "Low Confidence Score",
+                                    is_blocking=True,
+                                )
+
+                            self._save_column_policy(policy, pii_source=result["pii_source"])
+                            table_policies_by_column[col.column_name] = policy
+                            self._log_phase_event(
+                                PHASE_REASONING,
+                                result["step_name"],
+                                result["message"],
+                                table_name=table.table_name,
+                                status="completed",
+                                llm_insight=result["llm_insight"],
+                                details=result["details"],
+                            )
+
+                table_policies = [
+                    table_policies_by_column[col.column_name]
+                    for col in table.columns
+                    if col.column_name in table_policies_by_column
+                ]
 
                 # Step 2.6: Generation Strategy
                 domain = domain_map.get(table.table_name, "unknown")
                 strategy = self._load_existing_strategy(table.table_name)
                 if strategy:
-                    self._log_step(
+                    self._log_phase_event(
+                        PHASE_PLANNING,
                         "strategy_cache_hit",
+                        f"Reused the saved rule plan for {table.table_name}.",
                         table_name=table.table_name,
                         domain=domain,
                         status="completed",
+                        llm_insight=self._build_strategy_insight(strategy),
                         details={"tier_override": strategy.tier_override},
                     )
                 else:
                     strategy = planner.generate_strategy(table.table_name, domain, table_policies)
                     self._save_generation_strategy(strategy)
+                    self._log_phase_event(
+                        PHASE_PLANNING,
+                        "generation_strategy",
+                        f"Built a fresh deterministic rule plan for {table.table_name}.",
+                        table_name=table.table_name,
+                        domain=domain,
+                        status="completed",
+                        llm_insight=self._build_strategy_insight(strategy),
+                        details={
+                            "temporal_constraints": len(strategy.temporal_constraints or []),
+                            "post_generation_rules": len(strategy.post_generation_rules or []),
+                            "edge_case_injection_pct": strategy.edge_case_injection_pct,
+                        },
+                    )
 
                 self.column_policies_cache[table.table_name] = table_policies
                 self.strategies_cache[table.table_name] = strategy
@@ -355,15 +470,10 @@ class PipelineOrchestrator:
             self._update_status("Synthetic Data Generation", 65.0)
             logger.info("=== Phase 5: Synthesis ===")
 
-            tier_router = TierRouter(self.config)
             masking_engine = MaskingEngine(self.config['generation'].get('faker_locale', 'en_US'))
             structural_generator = StructuralColumnGenerator(random_seed=42)
-            junction_handler = JunctionHandler()
             edge_case_engine = EdgeCaseEngine()
             dedup_engine = DedupEngine(self.db_client)
-            ctgan_epochs = self.config['generation'].get('ctgan_epochs', 300)
-            tvae_epochs = self.config['generation'].get('tvae_epochs', 300)
-            model_save_dir = self.config['generation'].get('model_save_dir', 'models/trained')
 
             # Sort tables by dependency order: parent tables first
             sorted_tables = self._topological_sort(tables, all_rels)
@@ -395,11 +505,15 @@ class PipelineOrchestrator:
                 masked_df = masking_engine.mask_dataframe(source_df, policies)
                 profile = build_generation_profile(table_name, source_df, masked_df, policies, all_rels)
                 self.table_profiles_cache[table_name] = profile
-                self._log_step(
+                strategy_insight = self._build_strategy_insight(strategy)
+                self._log_phase_event(
+                    PHASE_PLANNING,
                     "table_profile",
+                    f"Profiled {table_name}: {len(profile.structural_columns)} structural and {len(profile.modeled_columns)} modeled columns ready for deterministic synthesis.",
                     table_name=table_name,
                     domain=domain,
                     status="completed",
+                    llm_insight=strategy_insight,
                     details={
                         "fingerprint": profile.fingerprint,
                         "structural_columns": len(profile.structural_columns),
@@ -407,54 +521,44 @@ class PipelineOrchestrator:
                         "sensitive_columns": len(profile.sensitive_columns),
                     },
                 )
-
-                # Step 3.1: Tier routing
-                tier_override = strategy.tier_override if strategy else None
-                tier = tier_router.route(table_name, len(source_df), tier_override, profile=profile)
-                if smoke_test_mode and tier != "rule_based":
-                    logger.info(
-                        "Smoke test mode active for filtered run. Overriding %s tier to rule_based for %s.",
-                        tier,
-                        table_name,
-                    )
-                    tier = "rule_based"
-
-                self._log_step("tier_routing", table_name=table_name, domain=domain, status="completed",
-                              details={"tier": tier, "row_count": len(source_df),
-                                       "tier_override": tier_override, "smoke_test": smoke_test_mode,
-                                       "modeled_columns": len(profile.modeled_columns),
-                                       "structural_columns": len(profile.structural_columns)})
-
-                # Step 3.3: Train and generate
-                num_rows = len(source_df)
-
-                # POC: cap epochs low to avoid blocking — production would use more
-                poc_ctgan_epochs = min(ctgan_epochs, 15)
-                poc_tvae_epochs = min(tvae_epochs, 15)
+                self._log_phase_event(
+                    PHASE_GENERATION,
+                    "rule_generation",
+                    f"Starting rule-based generation for {table_name}.",
+                    table_name=table_name,
+                    domain=domain,
+                    status="running",
+                    llm_insight=strategy_insight,
+                    details={
+                        "tier": "rule_based",
+                        "row_count": len(source_df),
+                        "smoke_test": smoke_test_mode,
+                        "modeled_columns": len(profile.modeled_columns),
+                        "structural_columns": len(profile.structural_columns),
+                    },
+                )
 
                 try:
-                    synthetic_df, effective_tier, model_reused = self._generate_table_output(
+                    synthetic_df = self._generate_table_output(
                         table_name=table_name,
-                        domain=domain,
                         source_df=source_df,
                         masked_df=masked_df,
                         policies=policies,
                         profile=profile,
-                        tier=tier,
-                        model_save_dir=model_save_dir,
-                        ctgan_epochs=poc_ctgan_epochs,
-                        tvae_epochs=poc_tvae_epochs,
                         structural_generator=structural_generator,
                     )
 
                 except Exception as e:
                     logger.error(f"Generation failed for {table_name}: {e}")
-                    self._log_step(
+                    self._log_phase_event(
+                        PHASE_GENERATION,
                         "generation_failed",
+                        f"Rule-based generation failed for {table_name}.",
                         table_name=table_name,
                         domain=domain,
                         status="failed",
-                        details={"tier": tier, "error": str(e)[:500]},
+                        llm_insight=strategy_insight,
+                        details={"tier": "rule_based", "error": str(e)[:500]},
                     )
                     continue
 
@@ -466,6 +570,19 @@ class PipelineOrchestrator:
                     relationships=all_rels,
                     strategy=strategy,
                 )
+                self._log_phase_event(
+                    PHASE_GENERATION,
+                    "constraint_repairs",
+                    f"Applied stitching, allowed-value repairs, temporal fixes, and uniqueness checks for {table_name}.",
+                    table_name=table_name,
+                    domain=domain,
+                    status="completed",
+                    llm_insight=strategy_insight,
+                    details={
+                        "tier": "rule_based",
+                        "relationships_considered": len(all_rels),
+                    },
+                )
 
                 # Step 3.5: Boundary Key Registry
                 self._update_boundary_keys(table_name, domain, synthetic_df, all_rels)
@@ -475,12 +592,32 @@ class PipelineOrchestrator:
                 synthetic_df = edge_case_engine.inject_edge_cases(
                     table_name, synthetic_df, policies, injection_pct
                 )
+                self._log_phase_event(
+                    PHASE_GENERATION,
+                    "edge_case_injection",
+                    f"Injected edge cases into {table_name} at {round(injection_pct * 100, 1)}%.",
+                    table_name=table_name,
+                    domain=domain,
+                    status="completed",
+                    llm_insight=strategy_insight,
+                    details={"edge_case_injection_pct": injection_pct},
+                )
 
                 # Step 3.7: Deduplication
                 dominant_dedup = self._get_dominant_dedup_mode(policies)
                 fk_cols = [r.source_column for r in all_rels if r.source_table.upper() == table_name.upper()]
                 synthetic_df = dedup_engine.deduplicate(
                     table_name, synthetic_df, dominant_dedup, fk_cols, self.run_id
+                )
+                self._log_phase_event(
+                    PHASE_GENERATION,
+                    "deduplication",
+                    f"Deduplicated {table_name} using {dominant_dedup} mode.",
+                    table_name=table_name,
+                    domain=domain,
+                    status="completed",
+                    llm_insight=strategy_insight,
+                    details={"dedup_mode": dominant_dedup, "foreign_key_columns": fk_cols},
                 )
 
                 # Coerce mixed-type object columns to match source dtypes
@@ -495,14 +632,26 @@ class PipelineOrchestrator:
                             pass
 
                 self.generated_data[table_name] = synthetic_df
-                self.generated_tiers[table_name] = effective_tier
+                self.generated_tiers[table_name] = "rule_based"
                 self._append_completed_table(table_name)
                 logger.info(f"Generated {len(synthetic_df)} records for {table_name}")
-                self._log_step("generation_complete", table_name=table_name, domain=domain, status="completed",
-                              details={"tier": effective_tier, "rows_generated": len(synthetic_df),
-                                       "columns": len(synthetic_df.columns), "model_reused": model_reused,
-                                       "modeled_columns": len(profile.modeled_columns),
-                                       "structural_columns": len(profile.structural_columns)})
+                self._log_phase_event(
+                    PHASE_GENERATION,
+                    "generation_complete",
+                    f"Generated {len(synthetic_df)} synthetic rows for {table_name}.",
+                    table_name=table_name,
+                    domain=domain,
+                    status="completed",
+                    llm_insight=strategy_insight,
+                    details={
+                        "tier": "rule_based",
+                        "rows_generated": len(synthetic_df),
+                        "columns": len(synthetic_df.columns),
+                        "model_reused": False,
+                        "modeled_columns": len(profile.modeled_columns),
+                        "structural_columns": len(profile.structural_columns),
+                    },
+                )
 
             # ================================================================
             # Phase 6: Validation Gate (Layer 4)
@@ -578,14 +727,27 @@ class PipelineOrchestrator:
                     tables_needing_retry.append(table_name)
                 else:
                     logger.info(f"All validations passed for {table_name}")
-                self._log_step("validation", table_name=table_name, status="completed",
-                              details={"total_checks": len(results), "passed": passed_count,
-                                       "failed": len(failures),
-                                       "failures": [f.check_name for f in failures][:10]})
+                validation_insight = self._build_strategy_insight(strategy)
+                self._log_phase_event(
+                    PHASE_VALIDATION,
+                    "validation",
+                    f"Validated {table_name}: {passed_count}/{len(results)} checks passed.",
+                    table_name=table_name,
+                    status="completed",
+                    llm_insight=validation_insight,
+                    details={
+                        "total_checks": len(results),
+                        "passed": passed_count,
+                        "failed": len(failures),
+                        "failures": [f.check_name for f in failures][:10],
+                    },
+                )
 
             if tables_needing_retry and not retry_diagnosis_enabled:
-                self._log_step(
+                self._log_phase_event(
+                    PHASE_VALIDATION,
                     "validation_retry_skipped",
+                    "Validation retry diagnosis was skipped because adaptive regeneration is disabled.",
                     status="completed",
                     details={
                         "tables": tables_needing_retry,
@@ -621,16 +783,21 @@ class PipelineOrchestrator:
                             self._save_generation_strategy(diagnosis.updated_strategy)
 
                         logger.info(f"Diagnosis for {table_name}: {diagnosis.root_cause}")
-                        self._log_step(
+                        self._log_phase_event(
+                            PHASE_VALIDATION,
                             "validation_diagnosis",
+                            f"Diagnosed validation issues for {table_name}.",
                             table_name=table_name,
                             status="completed",
+                            llm_insight=diagnosis.root_cause[:300],
                             details={"root_cause": diagnosis.root_cause[:300]},
                         )
                     except Exception as exc:
                         logger.warning("Diagnosis failed for %s: %s", table_name, exc)
-                        self._log_step(
+                        self._log_phase_event(
+                            PHASE_VALIDATION,
                             "validation_diagnosis",
+                            f"Validation diagnosis failed for {table_name}.",
                             table_name=table_name,
                             status="failed",
                             details={"error": str(exc)[:300]},
@@ -661,6 +828,7 @@ class PipelineOrchestrator:
 
             manifest = packager.package(
                 run_id=self.run_id,
+                source_name=self.source_name,
                 synthetic_datasets=self.generated_data,
                 validation_results=all_validation_results,
                 generation_strategies=gen_strategies,
@@ -683,9 +851,17 @@ class PipelineOrchestrator:
                     completed_at=datetime.utcnow()
                 )
 
-            self._log_step("delivery", status="completed",
-                          details={"output_path": str(manifest.output_path),
-                                   "tables_delivered": list(self.generated_data.keys())})
+            self._log_phase_event(
+                PHASE_VALIDATION,
+                "delivery",
+                "Packaged synthetic outputs and wrote the delivery manifest.",
+                status="completed",
+                llm_insight="Final packaging used the approved rule plan and recorded validation outcomes for downstream review.",
+                details={
+                    "output_path": str(manifest.output_path),
+                    "tables_delivered": list(self.generated_data.keys()),
+                },
+            )
 
             self._update_status("Completed", 100.0, "completed")
             logger.info(f"Pipeline completed. Manifest: {manifest.output_path}")
@@ -718,22 +894,146 @@ class PipelineOrchestrator:
         except Exception:
             return []
 
+    def _get_intelligence_parallel_workers(self, pending_columns: int) -> int:
+        """Bound column-analysis parallelism so the LLM speeds up without getting overwhelmed."""
+        pipeline_config = self.config.get("pipeline", {}) or {}
+        configured_workers = int(
+            pipeline_config.get(
+                "intelligence_parallel_workers",
+                min(6, max(2, (os.cpu_count() or 4) // 2)),
+            )
+        )
+        return max(1, min(configured_workers, pending_columns))
+
+    def _analyze_column_intelligence(self, connector, table_name: str, column, presidio) -> dict:
+        """Classify a single column and return structured results for main-thread persistence."""
+        try:
+            abbrev = AbbreviationResolver()
+            agent = LLMAgent()
+            confidence_threshold = self.config["llm"].get("confidence_threshold", 0.6)
+
+            try:
+                expanded_name, fully_resolved = abbrev.resolve_column_name(column.column_name)
+            except Exception:
+                expanded_name = column.column_name
+                fully_resolved = False
+
+            sample_vals = self._get_column_sample(connector, table_name, column.column_name)
+            with self._presidio_scan_lock:
+                pres_result = presidio.scan_column(table_name, column.column_name, sample_vals)
+
+            if pres_result.pii_detected and pres_result.confidence >= self.config["presidio"].get("confidence_threshold", 0.7):
+                masking_strategy = presidio.is_pii_passthrough(pres_result.pii_type)
+                policy = ColumnPolicySchema(
+                    column_name=column.column_name,
+                    table_name=table_name,
+                    pii_classification="sensitive_business",
+                    sensitivity_reason=f"Presidio detected {pres_result.pii_type} (conf={pres_result.confidence})",
+                    masking_strategy=masking_strategy,
+                    constraint_profile={},
+                    business_importance="important",
+                    edge_case_flags=[],
+                    dedup_mode="entity",
+                    llm_confidence=1.0,
+                    abbreviation_resolved=fully_resolved,
+                    notes=f"Auto-classified by Presidio. PII type: {pres_result.pii_type}",
+                )
+                return {
+                    "policy": policy,
+                    "pii_source": "presidio",
+                    "needs_review": False,
+                    "step_name": "pii_detection",
+                    "message": f"Presidio flagged {table_name}.{column.column_name} as {pres_result.pii_type}; masking plan locked in.",
+                    "llm_insight": "Deterministic PII detection short-circuited the LLM to keep this column fast and rule-safe.",
+                    "details": {
+                        "column": column.column_name,
+                        "source": "presidio",
+                        "pii_type": pres_result.pii_type,
+                        "masking": masking_strategy,
+                    },
+                }
+
+            policy = agent.classify_column(
+                table_name=table_name,
+                column_name_raw=column.column_name,
+                column_name_expanded=expanded_name,
+                data_type=column.data_type,
+                statistical_profile=str(column.model_dump()),
+                top_values=str(column.top_values),
+                presidio_result=str(pres_result.model_dump()),
+                abbreviation_status=str(fully_resolved),
+            )
+            return {
+                "policy": policy,
+                "pii_source": "llm",
+                "needs_review": policy.llm_confidence < confidence_threshold,
+                "step_name": "llm_reasoning",
+                "message": f"Classified {table_name}.{column.column_name} as {policy.pii_classification} with {policy.masking_strategy} masking.",
+                "llm_insight": (policy.sensitivity_reason or policy.notes or "")[:280],
+                "details": {
+                    "column": column.column_name,
+                    "pii": policy.pii_classification,
+                    "masking": policy.masking_strategy,
+                    "confidence": policy.llm_confidence,
+                    "reason": (policy.sensitivity_reason or "")[:200],
+                    "notes": (policy.notes or "")[:200],
+                },
+            }
+        except Exception as exc:
+            logger.exception("Parallel intelligence analysis failed for %s.%s", table_name, column.column_name)
+            policy = ColumnPolicySchema(
+                column_name=column.column_name,
+                table_name=table_name,
+                pii_classification="uncertain",
+                sensitivity_reason=f"Parallel analysis failed: {str(exc)[:120]}",
+                masking_strategy="passthrough",
+                constraint_profile={},
+                business_importance="low",
+                edge_case_flags=[],
+                dedup_mode="reference",
+                llm_confidence=0.0,
+                abbreviation_resolved=False,
+                notes="Created by parallel-analysis fallback",
+            )
+            return {
+                "policy": policy,
+                "pii_source": "llm",
+                "needs_review": True,
+                "step_name": "llm_reasoning",
+                "message": f"Fell back to a safe default policy for {table_name}.{column.column_name} after a parallel analysis error.",
+                "llm_insight": (policy.sensitivity_reason or policy.notes or "")[:280],
+                "details": {
+                    "column": column.column_name,
+                    "pii": policy.pii_classification,
+                    "masking": policy.masking_strategy,
+                    "confidence": policy.llm_confidence,
+                    "reason": (policy.sensitivity_reason or "")[:200],
+                    "notes": (policy.notes or "")[:200],
+                },
+            }
+
     def _save_column_policy(self, policy, pii_source: str = "llm"):
         """Upsert column policy to operational DB."""
         with self.db_client.session() as session:
             data = policy.model_dump()
             data['pii_source'] = pii_source
+            data['source_name'] = self.source_name
             self.db_client.upsert_column_policy(session, data)
 
     def _save_generation_strategy(self, strategy):
         """Upsert generation strategy to operational DB."""
         with self.db_client.session() as session:
-            self.db_client.upsert_generation_strategy(session, strategy.model_dump())
+            strategy_data = strategy.model_dump()
+            strategy_data["source_name"] = self.source_name
+            self.db_client.upsert_generation_strategy(session, strategy_data)
 
     def _load_existing_policies(self, table_name: str) -> dict:
         """Load cached column policies for a table from operational memory."""
         with self.db_client.session() as session:
-            records = session.query(db_models.ColumnPolicy).filter_by(table_name=table_name).all()
+            records = session.query(db_models.ColumnPolicy).filter_by(
+                source_name=self.source_name,
+                table_name=table_name,
+            ).all()
 
         policies = {}
         for record in records:
@@ -761,7 +1061,10 @@ class PipelineOrchestrator:
     def _load_existing_strategy(self, table_name: str):
         """Load a cached generation strategy for a table if available."""
         with self.db_client.session() as session:
-            return session.query(db_models.GenerationStrategy).filter_by(table_name=table_name).first()
+            return session.query(db_models.GenerationStrategy).filter_by(
+                source_name=self.source_name,
+                table_name=table_name,
+            ).first()
 
     def _strategy_to_dict(self, strategy):
         """Serialize either a Pydantic or ORM strategy object."""
@@ -806,6 +1109,7 @@ class PipelineOrchestrator:
         with self.db_client.session() as session:
             self.db_client.add_to_review_queue(session, {
                 "run_id": self.run_id,
+                "source_name": self.source_name,
                 "table_name": table_name,
                 "column_name": column_name,
                 "llm_best_guess": policy.model_dump(),
@@ -832,9 +1136,12 @@ class PipelineOrchestrator:
         if pending_reviews == 0:
             return
 
-        self._log_step(
+        self._log_phase_event(
+            PHASE_REASONING,
             "human_review_gate",
+            f"Waiting for {pending_reviews} blocking review approval(s) before generation can continue.",
             status="running",
+            llm_insight="LLM suggestions are paused here until a human reviewer confirms the low-confidence classifications.",
             details={"pending_reviews": pending_reviews},
         )
 
@@ -853,9 +1160,12 @@ class PipelineOrchestrator:
         with self.db_client.session() as session:
             self.db_client.update_run_log(session, self.run_id, status="running")
 
-        self._log_step(
+        self._log_phase_event(
+            PHASE_REASONING,
             "human_review_gate",
+            "All blocking review items are approved; deterministic generation can continue.",
             status="completed",
+            llm_insight="Human approval locked the policy decisions that the rule engine will now enforce.",
             details={"pending_reviews": 0},
         )
 
@@ -881,50 +1191,17 @@ class PipelineOrchestrator:
     def _generate_table_output(
         self,
         table_name: str,
-        domain: str,
         source_df: pd.DataFrame,
         masked_df: pd.DataFrame,
         policies: list,
         profile,
-        tier: str,
-        model_save_dir: str,
-        ctgan_epochs: int,
-        tvae_epochs: int,
         structural_generator: StructuralColumnGenerator,
     ):
-        """Generate a table using the shared structural + modeled flow."""
+        """Generate a table using the deterministic structural + rule-based flow."""
         num_rows = len(source_df)
         structural_df = structural_generator.generate(source_df, profile.structural_columns, num_rows)
         modeled_source_df = self._prepare_modeled_training_frame(source_df, masked_df, profile)
-
-        effective_tier = tier
-        model_reused = False
-
-        if tier in {"ctgan", "hybrid"} and not modeled_source_df.empty:
-            modeled_synth_df, model_reused = self._generate_ml_columns(
-                table_name=table_name,
-                domain=domain,
-                model_type="ctgan",
-                modeled_source_df=modeled_source_df,
-                policies=policies,
-                profile=profile,
-                model_save_dir=model_save_dir,
-                epochs=ctgan_epochs,
-            )
-        elif tier == "tvae" and not modeled_source_df.empty:
-            modeled_synth_df, model_reused = self._generate_ml_columns(
-                table_name=table_name,
-                domain=domain,
-                model_type="tvae",
-                modeled_source_df=modeled_source_df,
-                policies=policies,
-                profile=profile,
-                model_save_dir=model_save_dir,
-                epochs=tvae_epochs,
-            )
-        else:
-            effective_tier = "rule_based"
-            modeled_synth_df = self._generate_rule_based_columns(table_name, policies, modeled_source_df, num_rows)
+        modeled_synth_df = self._generate_rule_based_columns(table_name, policies, modeled_source_df, num_rows)
 
         synthetic_df = self._assemble_generated_table(
             source_df=source_df,
@@ -933,7 +1210,7 @@ class PipelineOrchestrator:
             structural_df=structural_df,
             modeled_synth_df=modeled_synth_df,
         )
-        return synthetic_df, effective_tier, model_reused
+        return synthetic_df
 
     def _prepare_modeled_training_frame(self, source_df: pd.DataFrame, masked_df: pd.DataFrame, profile) -> pd.DataFrame:
         """Build the ML training slice using source numerics and masked text columns."""

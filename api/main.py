@@ -19,7 +19,7 @@ from fastapi import FastAPI, BackgroundTasks, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from sqlalchemy import create_engine, inspect as sqlalchemy_inspect
 
-from config.config import load_config
+from config.config import get_data_source, get_data_sources, get_default_data_source, load_config
 
 from db.client import DatabaseClient
 import db.schema as db_models
@@ -42,6 +42,86 @@ app.add_middleware(
 db_client = DatabaseClient()
 orchestrator = PipelineOrchestrator()
 
+GENERATION_PHASES = [
+    {
+        "id": "schema_analysis",
+        "label": "Analyze Schema",
+        "description": "Inspect source tables, relationships, and domain structure.",
+        "start": 0.0,
+        "end": 20.0,
+        "steps": {"schema_ingestion", "knowledge_graph_build", "domain_partitioning"},
+    },
+    {
+        "id": "policy_reasoning",
+        "label": "Reason About Columns",
+        "description": "Detect sensitive fields, collect LLM reasoning, and pause for human review if needed.",
+        "start": 20.0,
+        "end": 55.0,
+        "steps": {"policy_cache_hit", "pii_detection", "llm_reasoning", "human_review_gate"},
+    },
+    {
+        "id": "rule_planning",
+        "label": "Build Rule Plan",
+        "description": "Profile tables and prepare deterministic rule-based generation instructions.",
+        "start": 55.0,
+        "end": 70.0,
+        "steps": {"generation_strategy", "strategy_cache_hit", "table_profile"},
+    },
+    {
+        "id": "rule_generation",
+        "label": "Generate Rule-Based Data",
+        "description": "Synthesize rows, repair constraints, inject edge cases, and deduplicate in real time.",
+        "start": 70.0,
+        "end": 90.0,
+        "steps": {
+            "rule_generation",
+            "constraint_repairs",
+            "edge_case_injection",
+            "deduplication",
+            "generation_complete",
+            "generation_failed",
+        },
+    },
+    {
+        "id": "validation_delivery",
+        "label": "Validate And Package",
+        "description": "Run validation checks, optional diagnosis, and package delivery artifacts.",
+        "start": 90.0,
+        "end": 100.0,
+        "steps": {"validation", "validation_retry_skipped", "validation_diagnosis", "delivery"},
+    },
+]
+
+GENERATION_PHASE_LOOKUP = {phase["id"]: phase for phase in GENERATION_PHASES}
+GENERATION_STEP_TO_PHASE = {
+    step_name: phase["id"]
+    for phase in GENERATION_PHASES
+    for step_name in phase["steps"]
+}
+
+STEP_TITLES = {
+    "schema_ingestion": "Schema ingestion",
+    "knowledge_graph_build": "Knowledge graph build",
+    "domain_partitioning": "Domain partitioning",
+    "policy_cache_hit": "Policy cache hit",
+    "pii_detection": "PII detection",
+    "llm_reasoning": "LLM reasoning",
+    "human_review_gate": "Human review gate",
+    "generation_strategy": "Rule plan creation",
+    "strategy_cache_hit": "Rule plan cache hit",
+    "table_profile": "Table profiling",
+    "rule_generation": "Rule-based generation",
+    "constraint_repairs": "Constraint repairs",
+    "edge_case_injection": "Edge case injection",
+    "deduplication": "Deduplication",
+    "generation_complete": "Generation complete",
+    "generation_failed": "Generation failed",
+    "validation": "Validation",
+    "validation_retry_skipped": "Validation retry skipped",
+    "validation_diagnosis": "Validation diagnosis",
+    "delivery": "Delivery packaging",
+}
+
 
 @app.on_event("startup")
 def startup_event():
@@ -56,17 +136,18 @@ def startup_event():
 def get_dashboard_stats(run_id: str | None = None):
     """Aggregate statistics for the dashboard."""
     with db_client.session() as session:
-        total_tables = session.query(db_models.TableMetadataRecord).count()
-        domains = [
-            d[0] for d in
-            session.query(db_models.TableMetadataRecord.domain).distinct().all()
-            if d[0]
-        ]
+        source_name = _get_run_source_name(session, run_id) if run_id else None
+        table_query = session.query(db_models.TableMetadataRecord)
+        policy_query = session.query(db_models.ColumnPolicy)
+        if source_name is not None:
+            table_query = table_query.filter_by(source_name=source_name)
+            policy_query = policy_query.filter_by(source_name=source_name)
 
-        total_columns = session.query(db_models.ColumnPolicy).count()
-        pii_cols = session.query(db_models.ColumnPolicy).filter(
-            db_models.ColumnPolicy.pii_classification != 'none'
-        ).count()
+        total_tables = table_query.count()
+        domains = [d[0] for d in table_query.with_entities(db_models.TableMetadataRecord.domain).distinct().all() if d[0]]
+
+        total_columns = policy_query.count()
+        pii_cols = policy_query.filter(db_models.ColumnPolicy.pii_classification != 'none').count()
         pending_query = session.query(db_models.HumanReviewQueue).filter(
             db_models.HumanReviewQueue.status == 'pending'
         )
@@ -154,6 +235,7 @@ def approve_review_item(item_id: int, approval: schemas.ReviewApproval):
         if item.llm_best_guess:
             policy_data = dict(item.llm_best_guess)
             policy_data['pii_source'] = 'human_review'
+            policy_data['source_name'] = item.source_name
             db_client.upsert_column_policy(session, policy_data)
 
     return {"message": "Approved", "item_id": item_id}
@@ -175,6 +257,7 @@ def correct_review_item(item_id: int, correction: schemas.ReviewCorrection):
         # Write corrected policy
         policy_data = correction.corrected_policy.model_dump()
         policy_data['pii_source'] = 'human_correction'
+        policy_data['source_name'] = item.source_name
         db_client.upsert_column_policy(session, policy_data)
 
     return {"message": "Corrected", "item_id": item_id}
@@ -213,6 +296,32 @@ def submit_abbreviation(item_id: int, submission: schemas.AbbreviationSubmission
 class PipelineStartRequest(schemas.BaseModel):
     table_filter: list[str] | None = None
     fast_mode: bool = False
+    source_name: str | None = None
+
+
+@app.get("/api/data-sources")
+def list_data_sources():
+    """Return configured source databases for launch-time selection."""
+    config = load_config()
+    default_source = get_default_data_source(config)
+    sources = []
+    for source in get_data_sources(config):
+        try:
+            engine = create_engine(source["connection_string"])
+            inspector = sqlalchemy_inspect(engine)
+            table_names = inspector.get_table_names()
+            table_count = len(table_names)
+        except Exception:
+            table_count = None
+        sources.append({
+            "name": source.get("name"),
+            "label": source.get("label", source.get("name")),
+            "description": source.get("description"),
+            "dialect": source.get("dialect"),
+            "table_count": table_count,
+            "is_default": source.get("name") == default_source.get("name"),
+        })
+    return sources
 
 @app.post("/api/pipeline/start")
 def start_pipeline(request: PipelineStartRequest = None):
@@ -222,10 +331,21 @@ def start_pipeline(request: PipelineStartRequest = None):
     """
     table_filter = request.table_filter if request else None
     fast_mode = request.fast_mode if request else False
-    run_id = orchestrator.initialize_run(table_filter=table_filter, fast_mode=fast_mode)
-    t = threading.Thread(target=orchestrator.execute_pipeline, args=(run_id, table_filter, fast_mode), daemon=True)
+    source_name = request.source_name if request else None
+    run_id = orchestrator.initialize_run(table_filter=table_filter, fast_mode=fast_mode, source_name=source_name)
+    t = threading.Thread(
+        target=orchestrator.execute_pipeline,
+        args=(run_id, table_filter, fast_mode, source_name),
+        daemon=True,
+    )
     t.start()
-    return {"message": "Pipeline started", "run_id": run_id, "table_filter": table_filter, "fast_mode": fast_mode}
+    return {
+        "message": "Pipeline started",
+        "run_id": run_id,
+        "table_filter": table_filter,
+        "fast_mode": fast_mode,
+        "source_name": source_name or orchestrator.source_name,
+    }
 
 
 @app.post("/api/pipeline/resume/{run_id}")
@@ -260,6 +380,7 @@ def get_pipeline_status(run_id: str):
 
         return schemas.PipelineRunStatus(
             run_id=run.run_id,
+            source_name=run.source_name,
             status=run.status or "unknown",
             current_step=run.current_step,
             progress_pct=run.progress_pct or 0.0,
@@ -282,6 +403,7 @@ def list_pipeline_runs():
 
         return [schemas.PipelineRunStatus(
             run_id=r.run_id,
+            source_name=r.source_name,
             status=r.status or "unknown",
             current_step=r.current_step,
             progress_pct=r.progress_pct or 0.0,
@@ -297,12 +419,17 @@ def list_pipeline_runs():
 # =====================================================
 
 @app.get("/api/policies")
-def get_all_policies():
+def get_all_policies(run_id: str | None = None, source_name: str | None = None):
     """Get all column policies for display."""
     with db_client.session() as session:
-        policies = session.query(db_models.ColumnPolicy).all()
+        resolved_source_name = _get_run_source_name(session, run_id) if run_id else source_name
+        query = session.query(db_models.ColumnPolicy)
+        if resolved_source_name is not None:
+            query = query.filter_by(source_name=resolved_source_name)
+        policies = query.all()
         return [{
             "id": p.id,
+            "source_name": p.source_name,
             "table_name": p.table_name,
             "column_name": p.column_name,
             "pii_classification": p.pii_classification,
@@ -319,12 +446,17 @@ def get_all_policies():
 
 
 @app.get("/api/strategies")
-def get_all_strategies():
+def get_all_strategies(run_id: str | None = None, source_name: str | None = None):
     """Get all generation strategies."""
     with db_client.session() as session:
-        strategies = session.query(db_models.GenerationStrategy).all()
+        resolved_source_name = _get_run_source_name(session, run_id) if run_id else source_name
+        query = session.query(db_models.GenerationStrategy)
+        if resolved_source_name is not None:
+            query = query.filter_by(source_name=resolved_source_name)
+        strategies = query.all()
         return [{
             "id": s.id,
+            "source_name": s.source_name,
             "table_name": s.table_name,
             "domain": s.domain,
             "tier_override": s.tier_override,
@@ -399,15 +531,22 @@ def _json_safe(value):
     return value
 
 
-def _get_source_engine():
+def _get_run_source_name(session, run_id: str | None) -> str | None:
+    if not run_id:
+        return None
+    run = session.query(db_models.PipelineRun).filter_by(run_id=run_id).first()
+    return run.source_name if run else None
+
+
+def _get_source_engine(source_name: str | None = None):
     config = load_config()
-    source_url = config["data_sources"][0]["connection_string"]
-    return create_engine(source_url)
+    source = get_data_source(source_name, config)
+    return create_engine(source["connection_string"])
 
 
-def _get_source_table_names() -> list[str]:
+def _get_source_table_names(source_name: str | None = None) -> list[str]:
     try:
-        engine = _get_source_engine()
+        engine = _get_source_engine(source_name=source_name)
         return sorted(sqlalchemy_inspect(engine).get_table_names())
     except Exception as exc:
         logger.warning(f"Failed to inspect source database tables: {exc}")
@@ -427,6 +566,7 @@ def _build_manifest_generation_entries(run_id: str | None = None) -> list[dict]:
         for table_name in manifest.get("tables_generated", []):
             entries.append({
                 "run_id": manifest_run_id,
+                "source_name": manifest.get("source_name"),
                 "table_name": table_name,
                 "tier": strategies.get(table_name, "unknown"),
                 "rows_generated": row_counts.get(table_name, 0),
@@ -458,7 +598,70 @@ def _get_run_requested_tables(session, run_id: str | None) -> list[str]:
     if run and run.table_filter:
         return sorted(run.table_filter)
 
-    return _get_source_table_names()
+    return _get_source_table_names(getattr(run, "source_name", None))
+
+
+def _resolve_generation_phase(step_name: str, details: dict | None = None) -> str | None:
+    phase_id = (details or {}).get("phase_id")
+    if phase_id in GENERATION_PHASE_LOOKUP:
+        return phase_id
+    return GENERATION_STEP_TO_PHASE.get(step_name)
+
+
+def _format_step_message(step_name: str, table_name: str | None, details: dict | None = None) -> str:
+    details = details or {}
+    if details.get("message"):
+        return str(details["message"])
+
+    if step_name == "llm_reasoning":
+        column = details.get("column", "column")
+        pii = details.get("pii", "unknown")
+        masking = details.get("masking", "passthrough")
+        return f"{table_name}.{column} classified as {pii} with {masking} masking."
+    if step_name == "pii_detection":
+        column = details.get("column", "column")
+        pii_type = details.get("pii_type", "PII")
+        return f"Presidio flagged {table_name}.{column} as {pii_type}."
+    if step_name == "validation":
+        return (
+            f"{table_name} passed {details.get('passed', 0)} of "
+            f"{details.get('total_checks', 0)} validation checks."
+        )
+    if step_name == "delivery":
+        return "Packaged the delivery bundle and wrote the manifest."
+    return STEP_TITLES.get(step_name, step_name.replace("_", " ").title())
+
+
+def _extract_llm_insight(details: dict | None = None) -> str | None:
+    details = details or {}
+    for key in ("llm_insight", "reason", "root_cause", "notes"):
+        value = details.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
+
+
+def _phase_progress(progress_pct: float, phase: dict) -> float:
+    start = phase["start"]
+    end = phase["end"]
+    if progress_pct <= start:
+        return 0.0
+    if progress_pct >= end:
+        return 100.0
+    return round(((progress_pct - start) / max(end - start, 1.0)) * 100, 1)
+
+
+def _infer_current_phase_id(run, steps: list) -> str:
+    if steps:
+        phase_id = _resolve_generation_phase(steps[-1].step_name, steps[-1].details or {})
+        if phase_id:
+            return phase_id
+
+    progress_pct = float(getattr(run, "progress_pct", 0.0) or 0.0)
+    for phase in GENERATION_PHASES:
+        if progress_pct <= phase["end"]:
+            return phase["id"]
+    return GENERATION_PHASES[-1]["id"]
 
 @app.get("/api/generation/log")
 def get_generation_log(run_id: str | None = None):
@@ -470,15 +673,23 @@ def get_generation_log(run_id: str | None = None):
         resolved_run_id = _resolve_latest_run_id(session, run_id)
         if not resolved_run_id:
             return []
+        run = session.query(db_models.PipelineRun).filter_by(run_id=resolved_run_id).first()
+        source_name = run.source_name if run else None
 
-        strategies = session.query(db_models.GenerationStrategy).all()
+        strategies_query = session.query(db_models.GenerationStrategy)
+        meta_query = session.query(db_models.TableMetadataRecord)
+        if source_name is not None:
+            strategies_query = strategies_query.filter_by(source_name=source_name)
+            meta_query = meta_query.filter_by(source_name=source_name)
+
+        strategies = strategies_query.all()
         step_logs = session.query(db_models.PipelineStepLog).filter(
             db_models.PipelineStepLog.run_id == resolved_run_id,
             db_models.PipelineStepLog.step_name.in_(["tier_routing", "generation_complete"])
         ).order_by(db_models.PipelineStepLog.started_at.desc()).all()
         pipeline_runs = session.query(db_models.PipelineRun).filter_by(run_id=resolved_run_id).all()
         requested_tables = _get_run_requested_tables(session, resolved_run_id)
-        meta_records = session.query(db_models.TableMetadataRecord).all()
+        meta_records = meta_query.all()
 
         tier_map = {s.table_name: s.tier_override or "auto" for s in strategies}
         domain_map = {s.table_name: s.domain for s in strategies}
@@ -550,6 +761,128 @@ def get_generation_log(run_id: str | None = None):
             item["table_name"],
         ),
     )
+
+
+@app.get("/api/generation/progress")
+def get_generation_progress(run_id: str | None = None):
+    """Return a phase-oriented realtime view of generation progress plus detailed logs."""
+    with db_client.session() as session:
+        resolved_run_id = _resolve_latest_run_id(session, run_id)
+        if not resolved_run_id:
+            return {
+                "run_id": None,
+                "status": "idle",
+                "current_step": None,
+                "progress_pct": 0.0,
+                "elapsed_seconds": 0.0,
+                "current_phase_id": GENERATION_PHASES[0]["id"],
+                "phases": [
+                    {
+                        "id": phase["id"],
+                        "label": phase["label"],
+                        "description": phase["description"],
+                        "status": "pending",
+                        "progress_pct": 0.0,
+                        "log_count": 0,
+                        "latest_message": None,
+                        "llm_insight": None,
+                    }
+                    for phase in GENERATION_PHASES
+                ],
+                "logs": [],
+            }
+
+        run = session.query(db_models.PipelineRun).filter_by(run_id=resolved_run_id).first()
+        if not run:
+            raise HTTPException(status_code=404, detail="Run not found")
+
+        elapsed = 0.0
+        if run.ended_at and run.started_at:
+            elapsed = (run.ended_at - run.started_at).total_seconds()
+        elif run.started_at:
+            elapsed = (datetime.utcnow() - run.started_at).total_seconds()
+
+        steps = session.query(db_models.PipelineStepLog).filter(
+            db_models.PipelineStepLog.run_id == resolved_run_id
+        ).order_by(
+            db_models.PipelineStepLog.started_at.asc(),
+            db_models.PipelineStepLog.id.asc(),
+        ).limit(1000).all()
+
+    current_phase_id = _infer_current_phase_id(run, steps)
+    phase_order = {phase["id"]: index for index, phase in enumerate(GENERATION_PHASES)}
+    current_phase_index = phase_order.get(current_phase_id, 0)
+
+    normalized_logs = []
+    logs_by_phase = {phase["id"]: [] for phase in GENERATION_PHASES}
+
+    for step in steps:
+        details = step.details or {}
+        phase_id = _resolve_generation_phase(step.step_name, details)
+        log_item = {
+            "id": step.id,
+            "phase_id": phase_id,
+            "title": STEP_TITLES.get(step.step_name, step.step_name.replace("_", " ").title()),
+            "step_name": step.step_name,
+            "table_name": step.table_name,
+            "domain": step.domain,
+            "status": step.status,
+            "message": _format_step_message(step.step_name, step.table_name, details),
+            "llm_insight": _extract_llm_insight(details),
+            "details": _json_safe(details),
+            "started_at": step.started_at.isoformat() if step.started_at else None,
+            "completed_at": step.completed_at.isoformat() if step.completed_at else None,
+            "duration_seconds": step.duration_seconds,
+        }
+        normalized_logs.append(log_item)
+        if phase_id in logs_by_phase:
+            logs_by_phase[phase_id].append(log_item)
+
+    phases = []
+    for index, phase in enumerate(GENERATION_PHASES):
+        phase_logs = logs_by_phase.get(phase["id"], [])
+        latest_log = phase_logs[-1] if phase_logs else None
+
+        if any(log["status"] == "failed" for log in phase_logs):
+            phase_status = "failed"
+        elif run.status == "completed":
+            phase_status = "completed"
+        elif phase_logs and index < current_phase_index:
+            phase_status = "completed"
+        elif phase_logs and (index == current_phase_index or any(log["status"] == "running" for log in phase_logs)):
+            phase_status = "waiting_review" if run.status == "waiting_review" else "running"
+        elif float(run.progress_pct or 0.0) >= phase["end"]:
+            phase_status = "completed"
+        else:
+            phase_status = "pending"
+
+        latest_insight = None
+        for log in reversed(phase_logs):
+            if log["llm_insight"]:
+                latest_insight = log["llm_insight"]
+                break
+
+        phases.append({
+            "id": phase["id"],
+            "label": phase["label"],
+            "description": phase["description"],
+            "status": phase_status,
+            "progress_pct": 100.0 if phase_status == "completed" else _phase_progress(float(run.progress_pct or 0.0), phase),
+            "log_count": len(phase_logs),
+            "latest_message": latest_log["message"] if latest_log else None,
+            "llm_insight": latest_insight,
+        })
+
+    return {
+        "run_id": resolved_run_id,
+        "status": run.status or "unknown",
+        "current_step": run.current_step,
+        "progress_pct": float(run.progress_pct or 0.0),
+        "elapsed_seconds": elapsed,
+        "current_phase_id": current_phase_id,
+        "phases": phases,
+        "logs": normalized_logs,
+    }
 
 
 @app.get("/api/training-metrics")
@@ -666,7 +999,7 @@ def get_training_metrics(run_id: str | None = None):
 
 
 @app.get("/api/data/tables")
-def get_data_tables(run_id: str | None = None):
+def get_data_tables(run_id: str | None = None, source_name: str | None = None):
     """Return all source tables plus generated-data availability for the viewer."""
     manifest_entries = _build_manifest_generation_entries(run_id=run_id)
     latest_generated = {}
@@ -675,8 +1008,12 @@ def get_data_tables(run_id: str | None = None):
 
     with db_client.session() as session:
         resolved_run_id = _resolve_latest_run_id(session, run_id) if run_id else None
-        source_tables = _get_run_requested_tables(session, resolved_run_id) if run_id else _get_source_table_names()
-        table_meta = session.query(db_models.TableMetadataRecord).all()
+        resolved_source_name = _get_run_source_name(session, resolved_run_id) if resolved_run_id else source_name
+        source_tables = _get_run_requested_tables(session, resolved_run_id) if run_id else _get_source_table_names(resolved_source_name)
+        table_meta_query = session.query(db_models.TableMetadataRecord)
+        if resolved_source_name is not None:
+            table_meta_query = table_meta_query.filter_by(source_name=resolved_source_name)
+        table_meta = table_meta_query.all()
         meta_map = {t.table_name: t for t in table_meta}
 
     all_tables = sorted(set(source_tables) | set(latest_generated.keys()) | set(meta_map.keys()))
@@ -688,6 +1025,7 @@ def get_data_tables(run_id: str | None = None):
         "source_row_count": getattr(meta_map.get(table_name), "row_count", None),
         "generated_row_count": latest_generated.get(table_name, {}).get("rows_generated"),
         "generated_run_id": latest_generated.get(table_name, {}).get("run_id"),
+        "source_name": resolved_source_name or latest_generated.get(table_name, {}).get("source_name"),
         "has_source": table_name in source_tables or table_name in meta_map,
         "has_generated": table_name in latest_generated,
         "tier": latest_generated.get(table_name, {}).get("tier"),
@@ -720,15 +1058,20 @@ def get_generated_data(table_name: str, run_id: str | None = None):
 
 
 @app.get("/api/source-data/{table_name}")
-def get_source_data(table_name: str):
+def get_source_data(table_name: str, run_id: str | None = None, source_name: str | None = None):
     """Return up to 50 sample rows of source data for comparison."""
     try:
-        engine = _get_source_engine()
+        resolved_source_name = source_name
+        if run_id:
+            with db_client.session() as session:
+                resolved_source_name = _get_run_source_name(session, run_id) or resolved_source_name
+        engine = _get_source_engine(resolved_source_name)
         total_rows = pd.read_sql(f'SELECT COUNT(*) AS total_rows FROM "{table_name}"', engine).iloc[0]["total_rows"]
         df = pd.read_sql(f'SELECT * FROM "{table_name}" LIMIT 50', engine)
         rows = _json_safe(df.head(50).to_dict(orient="records"))
         return {
             "table_name": table_name,
+            "source_name": resolved_source_name,
             "total_rows": int(total_rows),
             "sample_size": len(rows),
             "columns": list(df.columns),

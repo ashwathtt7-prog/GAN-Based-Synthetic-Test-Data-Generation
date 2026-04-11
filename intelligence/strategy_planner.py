@@ -22,15 +22,16 @@ class StrategyPlanner:
         policies_json = json.dumps([p.model_dump() for p in column_policies], indent=2)
         
         prompt = f"""
-Analyze the column-level policies for the table '{table_name}' in the '{domain}' domain, 
-and formulate a macro-level GenerationStrategySchema.
+Analyze the column-level policies for the table '{table_name}' in the '{domain}' domain,
+and formulate a macro-level GenerationStrategySchema for a deterministic, rule-based pipeline.
 
 Column Policies:
 {policies_json}
 
 Identify any temporal dependencies (e.g., START_DATE < END_DATE).
 Identify business rules for post-generation validation.
-Decide if CTGAN/TVAE default tier routing should be overridden.
+Keep the plan rule-based only; do not propose CTGAN, TVAE, training, or tier-routing behavior.
+Use tier_override only if you need a descriptive label for the rule plan, otherwise leave it null.
 Decide edge case injection percentage.
         """
         

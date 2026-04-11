@@ -4,6 +4,7 @@ Handles SQLite for POC, swappable to PostgreSQL via config.
 """
 
 import yaml
+import sqlite3
 from pathlib import Path
 from contextlib import contextmanager
 from sqlalchemy import create_engine, event, inspect, text
@@ -86,18 +87,36 @@ class DatabaseClient:
         """Create all tables."""
         init_db(self.engine)
         self.ensure_schema_compatibility()
+        self.backfill_legacy_source_names()
         self.mark_incomplete_runs_failed()
 
     def ensure_schema_compatibility(self):
         """Add newly introduced columns for existing SQLite databases."""
         additions = {
+            "column_policy": {
+                "source_name": "VARCHAR",
+            },
+            "generation_strategy": {
+                "source_name": "VARCHAR",
+            },
+            "generation_run_log": {
+                "source_name": "VARCHAR",
+            },
+            "table_metadata": {
+                "source_name": "VARCHAR",
+            },
             "pipeline_run": {
+                "source_name": "VARCHAR",
                 "table_filter": "TEXT",
                 "fast_mode": "BOOLEAN DEFAULT 0",
             },
             "human_review_queue": {
                 "run_id": "VARCHAR",
+                "source_name": "VARCHAR",
                 "is_blocking": "BOOLEAN DEFAULT 0",
+            },
+            "pipeline_step_log": {
+                "source_name": "VARCHAR",
             },
         }
 
@@ -109,6 +128,70 @@ class DatabaseClient:
                     if column_name in existing:
                         continue
                     connection.execute(text(f"ALTER TABLE {table_name} ADD COLUMN {column_name} {sql_type}"))
+
+    def backfill_legacy_source_names(self):
+        """Map pre-source-selector rows onto the default source so unique keys don't collide."""
+        sources = list(self.config.get("data_sources", []) or [])
+        if not sources:
+            return
+
+        default_source = next((source for source in sources if source.get("default")), None) or sources[0]
+        default_source_name = default_source.get("name")
+        if not default_source_name:
+            return
+
+        source_tables = [
+            "column_policy",
+            "generation_strategy",
+            "generation_run_log",
+            "table_metadata",
+            "pipeline_run",
+            "human_review_queue",
+            "pipeline_step_log",
+        ]
+
+        db_url = self.config.get("database", {}).get("url", "")
+        if db_url.startswith("sqlite:///"):
+            db_path = Path(db_url.replace("sqlite:///", "", 1))
+            if not db_path.is_absolute():
+                db_path = Path(__file__).parent.parent / db_path
+            conn = sqlite3.connect(db_path)
+            try:
+                cur = conn.cursor()
+                existing_tables = {
+                    row[0] for row in cur.execute(
+                        "SELECT name FROM sqlite_master WHERE type='table'"
+                    ).fetchall()
+                }
+                for table_name in source_tables:
+                    if table_name not in existing_tables:
+                        continue
+                    columns = {
+                        row[1] for row in cur.execute(f"PRAGMA table_info({table_name})").fetchall()
+                    }
+                    if "source_name" not in columns:
+                        continue
+                    cur.execute(
+                        f"UPDATE {table_name} SET source_name = ? WHERE source_name IS NULL",
+                        (default_source_name,),
+                    )
+                conn.commit()
+            finally:
+                conn.close()
+            return
+
+        inspector = inspect(self.engine)
+        with self.engine.begin() as connection:
+            for table_name in source_tables:
+                if table_name not in inspector.get_table_names():
+                    continue
+                columns = {column["name"] for column in inspector.get_columns(table_name)}
+                if "source_name" not in columns:
+                    continue
+                connection.execute(
+                    text(f"UPDATE {table_name} SET source_name = :source_name WHERE source_name IS NULL"),
+                    {"source_name": default_source_name},
+                )
 
     @contextmanager
     def session(self):
@@ -152,6 +235,7 @@ class DatabaseClient:
         """Insert or update a column policy."""
         from db.schema import ColumnPolicy
         existing = session.query(ColumnPolicy).filter_by(
+            source_name=policy_data.get("source_name"),
             table_name=policy_data["table_name"],
             column_name=policy_data["column_name"]
         ).first()
@@ -165,30 +249,34 @@ class DatabaseClient:
             session.add(policy)
             return policy
 
-    def get_column_policies(self, session: Session, table_name: str = None):
+    def get_column_policies(self, session: Session, table_name: str = None, source_name: str = None):
         """Get column policies, optionally filtered by table."""
         from db.schema import ColumnPolicy
         query = session.query(ColumnPolicy)
+        if source_name is not None:
+            query = query.filter_by(source_name=source_name)
         if table_name:
             query = query.filter_by(table_name=table_name)
         return query.all()
 
-    def get_domain_column_policies(self, session: Session, domain: str):
+    def get_domain_column_policies(self, session: Session, domain: str, source_name: str = None):
         """Get all column policies for tables in a domain."""
         from db.schema import ColumnPolicy, GenerationStrategy
-        table_names = [
-            gs.table_name for gs in
-            session.query(GenerationStrategy).filter_by(domain=domain).all()
-        ]
-        return session.query(ColumnPolicy).filter(
-            ColumnPolicy.table_name.in_(table_names)
-        ).all()
+        strategy_query = session.query(GenerationStrategy).filter_by(domain=domain)
+        if source_name is not None:
+            strategy_query = strategy_query.filter_by(source_name=source_name)
+        table_names = [gs.table_name for gs in strategy_query.all()]
+        policy_query = session.query(ColumnPolicy).filter(ColumnPolicy.table_name.in_(table_names))
+        if source_name is not None:
+            policy_query = policy_query.filter_by(source_name=source_name)
+        return policy_query.all()
 
     # === Generation Strategy Operations ===
     def upsert_generation_strategy(self, session: Session, strategy_data: dict):
         """Insert or update a generation strategy."""
         from db.schema import GenerationStrategy
         existing = session.query(GenerationStrategy).filter_by(
+            source_name=strategy_data.get("source_name"),
             table_name=strategy_data["table_name"]
         ).first()
 
@@ -244,11 +332,12 @@ class DatabaseClient:
         return query.order_by(HumanReviewQueue.created_at.asc()).all()
 
     # === Run Log Operations ===
-    def create_run_log(self, session: Session, run_id: str, domains: list):
+    def create_run_log(self, session: Session, run_id: str, domains: list, source_name: str = None):
         """Create a new generation run log entry."""
         from db.schema import GenerationRunLog
         log = GenerationRunLog(
             run_id=run_id,
+            source_name=source_name,
             status="running",
             domains_completed=[],
             domains_pending=domains,
@@ -269,11 +358,13 @@ class DatabaseClient:
     # === Pipeline Step Log Operations ===
     def log_pipeline_step(self, session: Session, run_id: str, step_name: str,
                            domain: str = None, table_name: str = None,
+                           source_name: str = None,
                            status: str = "running", details: dict = None):
         """Log a pipeline step for dashboard tracking."""
         from db.schema import PipelineStepLog
         step = PipelineStepLog(
             run_id=run_id,
+            source_name=source_name,
             step_name=step_name,
             domain=domain,
             table_name=table_name,

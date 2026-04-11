@@ -12,7 +12,7 @@ llm:
   structured_output: true               # enforce JSON schema on every call
   retry_max: 3                          # max retries on validation failure
   confidence_threshold: 0.6             # below this → human review queue
-  service_account_path: "../service-account.json"
+  service_account_path: "service-account.json"
 
 # === Database Configuration ===
 database:
@@ -33,8 +33,17 @@ data_sources:
   # For POC: local SQLite databases with seed data
   # For production: JDBC connection strings to Oracle/PostgreSQL/MySQL
   - name: "telecom_poc"
+    label: "Telecom Full Demo"
+    description: "22-table telecom source with customer, billing, and network domains."
+    default: true
     type: "sqlite"
-    connection_string: "sqlite:///./datasets/telecom_source.db"
+    connection_string: "sqlite:///./datasets/telecom_source_seed.db"
+    dialect: "sqlite"
+  - name: "demo_showcase"
+    label: "Retail Mini Demo"
+    description: "4-table relational demo with customers, products, orders, and order items."
+    type: "sqlite"
+    connection_string: "sqlite:///./datasets/demo_showcase.db"
     dialect: "sqlite"
 
 # === Schema Ingestion ===
@@ -96,6 +105,7 @@ pipeline:
   human_review_mode: "wait"             # "wait" or "skip" — keep minimal blocking review before generation
   resume_on_crash: true                 # resume from last completed domain
   domain_generation_order: "dependency" # "dependency" or "alphabetical"
+  intelligence_parallel_workers: 4      # concurrent column analyses per table during intelligence
 
 # === Abbreviation Dictionary (seeded) ===
 abbreviations:

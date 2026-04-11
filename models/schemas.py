@@ -150,6 +150,7 @@ class ValidationResult(BaseModel):
 class DeliveryManifest(BaseModel):
     """Manifest for delivered synthetic dataset."""
     run_id: str
+    source_name: Optional[str] = None
     tables_generated: list[str]
     row_counts: dict[str, int]
     validation_results: dict[str, list[dict]]
@@ -199,6 +200,7 @@ class AbbreviationSubmission(BaseModel):
 class PipelineRunStatus(BaseModel):
     """API model for pipeline run status."""
     run_id: str
+    source_name: Optional[str] = None
     status: str
     domains_completed: list[str] = []
     domains_pending: list[str] = []

@@ -19,7 +19,7 @@ const MASKING_COLORS = {
   generalise: 'bg-amber-100 text-amber-700 border-amber-200',
 };
 
-const ReasoningPanel = ({ onClose, embedded = false }) => {
+const ReasoningPanel = ({ onClose, embedded = false, runId = null }) => {
   const [policies, setPolicies] = useState([]);
   const [filterTable, setFilterTable] = useState('all');
   const [filterPii, setFilterPii] = useState('all');
@@ -29,7 +29,9 @@ const ReasoningPanel = ({ onClose, embedded = false }) => {
   useEffect(() => {
     const fetchPolicies = async () => {
       try {
-        const res = await axios.get(`${API_BASE}/policies`);
+        const res = await axios.get(`${API_BASE}/policies`, {
+          params: runId ? { run_id: runId } : {},
+        });
         setPolicies(res.data || []);
         const uniqueTables = [...new Set((res.data || []).map(p => p.table_name))];
         setTables(uniqueTables);
@@ -38,7 +40,7 @@ const ReasoningPanel = ({ onClose, embedded = false }) => {
       }
     };
     fetchPolicies();
-  }, []);
+  }, [runId]);
 
   const filtered = policies.filter(p => {
     if (filterTable !== 'all' && p.table_name !== filterTable) return false;

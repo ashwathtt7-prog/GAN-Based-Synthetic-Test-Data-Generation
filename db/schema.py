@@ -19,6 +19,7 @@ class ColumnPolicy(Base):
     __tablename__ = "column_policy"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    source_name = Column(String, nullable=True)
     table_name = Column(String, nullable=False)
     column_name = Column(String, nullable=False)
     pii_classification = Column(String)  # none, sensitive_business, uncertain
@@ -45,6 +46,7 @@ class GenerationStrategy(Base):
     __tablename__ = "generation_strategy"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    source_name = Column(String, nullable=True)
     table_name = Column(String, nullable=False, unique=True)
     domain = Column(String)
     tier_override = Column(String)  # ctgan, tvae, rule_based, hybrid, or None
@@ -89,6 +91,7 @@ class GenerationRunLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String, nullable=False, unique=True)
+    source_name = Column(String, nullable=True)
     status = Column(String)  # running, completed, failed, partial
     domains_completed = Column(JSON)
     domains_pending = Column(JSON)
@@ -103,6 +106,7 @@ class TableMetadataRecord(Base):
     __tablename__ = "table_metadata"
 
     id = Column(Integer, primary_key=True, autoincrement=True)
+    source_name = Column(String, nullable=True)
     table_name = Column(String, nullable=False, unique=True)
     row_count = Column(Integer, default=0)
     column_count = Column(Integer, default=0)
@@ -117,6 +121,7 @@ class PipelineRun(Base):
     
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String, nullable=False, unique=True)
+    source_name = Column(String, nullable=True)
     status = Column(String)
     current_step = Column(String)
     progress_pct = Column(Float, default=0.0)
@@ -133,6 +138,7 @@ class HumanReviewQueue(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String)
+    source_name = Column(String, nullable=True)
     table_name = Column(String)
     column_name = Column(String)
     llm_best_guess = Column(JSON)  # JSON of LLM's best attempt
@@ -167,6 +173,7 @@ class PipelineStepLog(Base):
 
     id = Column(Integer, primary_key=True, autoincrement=True)
     run_id = Column(String, nullable=False)
+    source_name = Column(String, nullable=True)
     step_name = Column(String, nullable=False)  # e.g., "presidio_scan", "llm_reasoning"
     domain = Column(String)
     table_name = Column(String)

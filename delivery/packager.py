@@ -31,6 +31,7 @@ class DeliveryPackager:
     def package(
         self,
         run_id: str,
+        source_name: str | None,
         synthetic_datasets: dict,
         validation_results: dict,
         generation_strategies: dict,
@@ -90,6 +91,7 @@ class DeliveryPackager:
         # Generate manifest
         manifest = DeliveryManifest(
             run_id=run_id,
+            source_name=source_name,
             tables_generated=list(synthetic_datasets.keys()),
             row_counts=row_counts,
             validation_results=serialized_results,

@@ -15,7 +15,7 @@ import logging
 import yaml
 import networkx as nx
 from pathlib import Path
-from threading import Lock
+from threading import Lock, RLock
 from typing import Optional
 
 logger = logging.getLogger(__name__)
@@ -55,6 +55,7 @@ class KnowledgeGraph:
     def __init__(self):
         self.G = nx.DiGraph()
         self.abbreviation_dict: dict[str, str] = {}
+        self._graph_lock = RLock()
         self._seed_abbreviations()
         logger.info("KnowledgeGraph initialized (NetworkX in-memory)")
 
@@ -73,7 +74,8 @@ class KnowledgeGraph:
 
     def add_abbreviation(self, token: str, expansion: str):
         """Add or update an abbreviation in the dictionary."""
-        self.abbreviation_dict[token.upper()] = expansion
+        with self._graph_lock:
+            self.abbreviation_dict[token.upper()] = expansion
 
     def build_graph(self, tables, relationships):
         """
@@ -83,45 +85,46 @@ class KnowledgeGraph:
             tables: list of TableMetadata pydantic models
             relationships: list of RelationshipInfo pydantic models
         """
-        self.G.clear()
+        with self._graph_lock:
+            self.G.clear()
 
-        # Add table nodes
-        for table in tables:
-            table_id = f"table:{table.table_name}"
-            self.G.add_node(table_id,
-                            node_type="table",
-                            name=table.table_name,
-                            row_count=table.row_count,
-                            column_count=table.column_count,
-                            domain=None)
+            # Add table nodes
+            for table in tables:
+                table_id = f"table:{table.table_name}"
+                self.G.add_node(table_id,
+                                node_type="table",
+                                name=table.table_name,
+                                row_count=table.row_count,
+                                column_count=table.column_count,
+                                domain=None)
 
-            # Add column nodes and HAS_COLUMN edges
-            for col in table.columns:
-                col_id = f"col:{table.table_name}.{col.column_name}"
-                self.G.add_node(col_id,
-                                node_type="column",
-                                name=col.column_name,
-                                table=table.table_name,
-                                data_type=col.data_type,
-                                row_count=col.row_count,
-                                null_rate=col.null_rate,
-                                unique_count=col.unique_count,
-                                top_values=col.top_values if col.top_values else [])
+                # Add column nodes and HAS_COLUMN edges
+                for col in table.columns:
+                    col_id = f"col:{table.table_name}.{col.column_name}"
+                    self.G.add_node(col_id,
+                                    node_type="column",
+                                    name=col.column_name,
+                                    table=table.table_name,
+                                    data_type=col.data_type,
+                                    row_count=col.row_count,
+                                    null_rate=col.null_rate,
+                                    unique_count=col.unique_count,
+                                    top_values=col.top_values if col.top_values else [])
 
-                self.G.add_edge(table_id, col_id, edge_type="HAS_COLUMN")
+                    self.G.add_edge(table_id, col_id, edge_type="HAS_COLUMN")
 
-        # Add FK relationship edges (Table → Table)
-        for rel in relationships:
-            src_id = f"table:{rel.source_table}"
-            tgt_id = f"table:{rel.target_table}"
-            # Ensure both nodes exist
-            if src_id in self.G and tgt_id in self.G:
-                self.G.add_edge(src_id, tgt_id,
-                                edge_type="RELATES_TO",
-                                source_column=rel.source_column,
-                                target_column=rel.target_column,
-                                relationship_type=rel.relationship_type,
-                                confidence=rel.confidence)
+            # Add FK relationship edges (Table → Table)
+            for rel in relationships:
+                src_id = f"table:{rel.source_table}"
+                tgt_id = f"table:{rel.target_table}"
+                # Ensure both nodes exist
+                if src_id in self.G and tgt_id in self.G:
+                    self.G.add_edge(src_id, tgt_id,
+                                    edge_type="RELATES_TO",
+                                    source_column=rel.source_column,
+                                    target_column=rel.target_column,
+                                    relationship_type=rel.relationship_type,
+                                    confidence=rel.confidence)
 
         logger.info(f"Knowledge graph built: {self._count_tables()} tables, "
                      f"{self._count_columns()} columns, "
@@ -130,15 +133,17 @@ class KnowledgeGraph:
     def set_domain(self, table_name: str, domain: str):
         """Write domain assignment back to the graph."""
         table_id = f"table:{table_name}"
-        if table_id in self.G:
-            self.G.nodes[table_id]["domain"] = domain
+        with self._graph_lock:
+            if table_id in self.G:
+                self.G.nodes[table_id]["domain"] = domain
 
     def update_column_policy(self, table_name: str, column_name: str, policy_data: dict):
         """Write LLM classification results back to the column node."""
         col_id = f"col:{table_name}.{column_name}"
-        if col_id in self.G:
-            for k, v in policy_data.items():
-                self.G.nodes[col_id][k] = v
+        with self._graph_lock:
+            if col_id in self.G:
+                for k, v in policy_data.items():
+                    self.G.nodes[col_id][k] = v
 
     # ──────────────────────────────────────────
     # LLM Graph Tool implementations
@@ -150,18 +155,19 @@ class KnowledgeGraph:
         table_name = table_name.upper()
         table_id = f"table:{table_name}"
 
-        if table_id not in self.G:
-            return f"Table {table_name} not found in knowledge graph."
+        with self._graph_lock:
+            if table_id not in self.G:
+                return f"Table {table_name} not found in knowledge graph."
 
-        table_data = dict(self.G.nodes[table_id])
-        table_data.pop("node_type", None)
+            table_data = dict(self.G.nodes[table_id])
+            table_data.pop("node_type", None)
 
-        columns = []
-        for _, col_id, edge_data in self.G.out_edges(table_id, data=True):
-            if edge_data.get("edge_type") == "HAS_COLUMN":
-                col_data = dict(self.G.nodes[col_id])
-                col_data.pop("node_type", None)
-                columns.append(col_data)
+            columns = []
+            for _, col_id, edge_data in self.G.out_edges(table_id, data=True):
+                if edge_data.get("edge_type") == "HAS_COLUMN":
+                    col_data = dict(self.G.nodes[col_id])
+                    col_data.pop("node_type", None)
+                    columns.append(col_data)
 
         return json.dumps({"table": table_data, "columns": columns}, indent=2, default=str)
 
@@ -171,19 +177,20 @@ class KnowledgeGraph:
         table_id = f"table:{table_name}"
         rels = []
 
-        # Outgoing RELATES_TO
-        for _, tgt, data in self.G.out_edges(table_id, data=True):
-            if data.get("edge_type") == "RELATES_TO":
-                other_name = self.G.nodes[tgt].get("name", tgt)
-                rels.append({"related_table": other_name, "direction": "outgoing",
-                             "details": {k: v for k, v in data.items() if k != "edge_type"}})
+        with self._graph_lock:
+            # Outgoing RELATES_TO
+            for _, tgt, data in self.G.out_edges(table_id, data=True):
+                if data.get("edge_type") == "RELATES_TO":
+                    other_name = self.G.nodes[tgt].get("name", tgt)
+                    rels.append({"related_table": other_name, "direction": "outgoing",
+                                 "details": {k: v for k, v in data.items() if k != "edge_type"}})
 
-        # Incoming RELATES_TO
-        for src, _, data in self.G.in_edges(table_id, data=True):
-            if data.get("edge_type") == "RELATES_TO":
-                other_name = self.G.nodes[src].get("name", src)
-                rels.append({"related_table": other_name, "direction": "incoming",
-                             "details": {k: v for k, v in data.items() if k != "edge_type"}})
+            # Incoming RELATES_TO
+            for src, _, data in self.G.in_edges(table_id, data=True):
+                if data.get("edge_type") == "RELATES_TO":
+                    other_name = self.G.nodes[src].get("name", src)
+                    rels.append({"related_table": other_name, "direction": "incoming",
+                                 "details": {k: v for k, v in data.items() if k != "edge_type"}})
 
         return json.dumps(rels, indent=2, default=str)
 
@@ -195,31 +202,34 @@ class KnowledgeGraph:
 
         visited = set()
         queue = [(table_id, 0)]
-        while queue:
-            node, depth = queue.pop(0)
-            if depth > 3:
-                continue
-            for _, tgt, data in self.G.out_edges(node, data=True):
-                if data.get("edge_type") == "RELATES_TO" and tgt not in visited:
-                    visited.add(tgt)
-                    tgt_name = self.G.nodes[tgt].get("name", tgt)
-                    downstream.append(tgt_name)
-                    queue.append((tgt, depth + 1))
+        with self._graph_lock:
+            while queue:
+                node, depth = queue.pop(0)
+                if depth > 3:
+                    continue
+                for _, tgt, data in self.G.out_edges(node, data=True):
+                    if data.get("edge_type") == "RELATES_TO" and tgt not in visited:
+                        visited.add(tgt)
+                        tgt_name = self.G.nodes[tgt].get("name", tgt)
+                        downstream.append(tgt_name)
+                        queue.append((tgt, depth + 1))
 
         return json.dumps(downstream, indent=2)
 
     def get_abbreviation(self, token: str) -> str:
         """Returns the expanded form of an abbreviation from the dictionary."""
-        expansion = self.abbreviation_dict.get(token.upper())
+        with self._graph_lock:
+            expansion = self.abbreviation_dict.get(token.upper())
         return expansion if expansion else "null"
 
     def get_domain(self, table_name: str) -> str:
         """Returns the business domain assigned to the table."""
         table_name = table_name.upper()
         table_id = f"table:{table_name}"
-        if table_id in self.G:
-            domain = self.G.nodes[table_id].get("domain")
-            return domain if domain else "unknown"
+        with self._graph_lock:
+            if table_id in self.G:
+                domain = self.G.nodes[table_id].get("domain")
+                return domain if domain else "unknown"
         return "unknown"
 
     # ──────────────────────────────────────────

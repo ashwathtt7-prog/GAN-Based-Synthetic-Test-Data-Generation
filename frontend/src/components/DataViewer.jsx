@@ -1,4 +1,4 @@
-import React, { useEffect, useMemo, useState } from 'react';
+import React, { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import axios from 'axios';
 import { ArrowLeftRight, ChevronDown, RefreshCw, Table2, X } from 'lucide-react';
 
@@ -14,18 +14,28 @@ const DataViewer = ({ onClose, runId = null, embedded = false }) => {
   const [loading, setLoading] = useState(false);
   const [loadingTables, setLoadingTables] = useState(true);
   const [dropdownOpen, setDropdownOpen] = useState(false);
+  const tablesRef = useRef([]);
+  const selectedTableRef = useRef(null);
+
+  useEffect(() => {
+    tablesRef.current = tables;
+  }, [tables]);
+
+  useEffect(() => {
+    selectedTableRef.current = selectedTable;
+  }, [selectedTable]);
 
   const selectedMeta = useMemo(
     () => tables.find((table) => table.table_name === selectedTable) || null,
     [tables, selectedTable]
   );
 
-  const loadTable = async (tableName, tableMeta = null) => {
+  const loadTable = useCallback(async (tableName, tableMeta = null) => {
     if (!tableName) {
       return;
     }
 
-    const resolvedMeta = tableMeta || tables.find((table) => table.table_name === tableName);
+    const resolvedMeta = tableMeta || tablesRef.current.find((table) => table.table_name === tableName);
     setSelectedTable(tableName);
     setLoading(true);
     setDropdownOpen(false);
@@ -39,7 +49,9 @@ const DataViewer = ({ onClose, runId = null, embedded = false }) => {
           : Promise.resolve({ data: EMPTY_DATA }),
         resolvedMeta?.has_source === false
           ? Promise.resolve({ data: EMPTY_DATA })
-          : axios.get(`${API_BASE}/source-data/${tableName}`).catch(() => ({ data: EMPTY_DATA })),
+          : axios.get(`${API_BASE}/source-data/${tableName}`, {
+              params: runId ? { run_id: runId } : {},
+            }).catch(() => ({ data: EMPTY_DATA })),
       ]);
       setSyntheticData(synRes.data || EMPTY_DATA);
       setSourceData(srcRes.data || EMPTY_DATA);
@@ -50,9 +62,9 @@ const DataViewer = ({ onClose, runId = null, embedded = false }) => {
     } finally {
       setLoading(false);
     }
-  };
+  }, [runId]);
 
-  const fetchTables = async () => {
+  const fetchTables = useCallback(async () => {
     setLoadingTables(true);
     try {
       const res = await axios.get(`${API_BASE}/data/tables`, {
@@ -66,14 +78,15 @@ const DataViewer = ({ onClose, runId = null, embedded = false }) => {
       });
       setTables(orderedTables);
 
+      const currentSelection = selectedTableRef.current;
       const nextTable =
-        selectedTable && orderedTables.some((table) => table.table_name === selectedTable)
-          ? selectedTable
+        currentSelection && orderedTables.some((table) => table.table_name === currentSelection)
+          ? currentSelection
           : orderedTables.find((table) => table.has_generated)?.table_name || orderedTables[0]?.table_name;
 
       if (nextTable) {
         const nextMeta = orderedTables.find((table) => table.table_name === nextTable);
-        loadTable(nextTable, nextMeta);
+        await loadTable(nextTable, nextMeta);
       } else {
         setSelectedTable(null);
         setSyntheticData(EMPTY_DATA);
@@ -85,11 +98,11 @@ const DataViewer = ({ onClose, runId = null, embedded = false }) => {
     } finally {
       setLoadingTables(false);
     }
-  };
+  }, [loadTable, runId]);
 
   useEffect(() => {
     fetchTables();
-  }, [runId]);
+  }, [fetchTables]);
 
   const renderTable = (data, label, accentClass) => {
     if (!data || !data.rows || data.rows.length === 0) {

@@ -22,10 +22,27 @@ const API_BASE = "http://localhost:8001/api";
 const MENU_ITEMS = [
   { id: 'overview', label: 'Overview', icon: LayoutGrid },
   { id: 'review', label: 'Human Review', icon: ShieldCheck },
-  { id: 'insights', label: 'Generation', icon: Sparkles },
+  { id: 'insights', label: 'Live Progress', icon: Sparkles },
   { id: 'data', label: 'View Data', icon: Database },
   { id: 'graph', label: 'Graph', icon: Network },
   { id: 'policies', label: 'Policies', icon: Brain },
+];
+
+const FALLBACK_SOURCES = [
+  {
+    name: 'telecom_poc',
+    label: 'Telecom Source DB',
+    description: '22-table telecom source with customer, billing, and network domains.',
+    table_count: 22,
+    is_default: true,
+  },
+  {
+    name: 'demo_showcase',
+    label: 'Retail Mini Demo DB',
+    description: '4-table relational demo with customers, products, orders, and order items.',
+    table_count: 4,
+    is_default: false,
+  },
 ];
 
 const STATUS_BADGE = {
@@ -56,12 +73,14 @@ const parseTableFilter = (raw) => {
 const Dashboard = () => {
   const [active, setActive] = useState('overview');
   const [runs, setRuns] = useState([]);
+  const [dataSources, setDataSources] = useState(FALLBACK_SOURCES);
+  const [loadingSources, setLoadingSources] = useState(true);
+  const [selectedSourceName, setSelectedSourceName] = useState('telecom_poc');
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
   const [blockingReviews, setBlockingReviews] = useState([]);
   const [tableFilterText, setTableFilterText] = useState('');
-  const [fastMode, setFastMode] = useState(true);
   const [starting, setStarting] = useState(false);
   const [startMessage, setStartMessage] = useState('');
   const [startError, setStartError] = useState('');
@@ -71,6 +90,51 @@ const Dashboard = () => {
     () => runs.find((run) => run.run_id === selectedRunId) || null,
     [runs, selectedRunId]
   );
+
+  const selectedSource = useMemo(
+    () =>
+      dataSources.find((source) => source.name === selectedSourceName) ||
+      FALLBACK_SOURCES.find((source) => source.name === selectedSourceName) ||
+      null,
+    [dataSources, selectedSourceName]
+  );
+
+  const availableSources = useMemo(
+    () => (dataSources.length > 0 ? dataSources : FALLBACK_SOURCES),
+    [dataSources]
+  );
+
+  useEffect(() => {
+    const fetchSources = async () => {
+      try {
+        setLoadingSources(true);
+        const res = await axios.get(`${API_BASE}/data-sources`);
+        const list = res.data || [];
+        if (list.length > 0) {
+          setDataSources(list);
+          setSelectedSourceName((current) => {
+            const stillValid = list.some((source) => source.name === current);
+            if (stillValid) {
+              return current;
+            }
+            return list.find((source) => source.is_default)?.name || list[0]?.name || '';
+          });
+          return;
+        }
+      } catch (err) {
+        console.error("Failed to fetch data sources", err);
+      } finally {
+        setLoadingSources(false);
+      }
+
+      setDataSources((current) => (current.length > 0 ? current : FALLBACK_SOURCES));
+      setSelectedSourceName((current) => current || FALLBACK_SOURCES[0].name);
+    };
+
+    fetchSources();
+    const interval = setInterval(fetchSources, 10000);
+    return () => clearInterval(interval);
+  }, []);
 
   useEffect(() => {
     const fetchRuns = async () => {
@@ -130,12 +194,13 @@ const Dashboard = () => {
       const tableFilter = parseTableFilter(tableFilterText);
       const res = await axios.post(`${API_BASE}/pipeline/start`, {
         table_filter: tableFilter,
-        fast_mode: fastMode,
+        fast_mode: true,
+        source_name: selectedSourceName || undefined,
       });
       setSelectedRunId(res.data?.run_id || null);
-      setStartMessage(`Run started: ${res.data?.run_id?.slice(0, 8) || 'new run'}`);
-      setActive('overview');
-    } catch (err) {
+      setStartMessage(`Run started: ${res.data?.run_id?.slice(0, 8) || 'new run'} on ${res.data?.source_name || selectedSourceName || 'default source'}`);
+      setActive('insights');
+    } catch {
       setStartError('Failed to start pipeline. Check the backend logs.');
     } finally {
       setStarting(false);
@@ -158,8 +223,8 @@ const Dashboard = () => {
       <aside className="w-full md:w-64 border-b md:border-b-0 md:border-r border-slate-200 bg-white/80 backdrop-blur">
         <div className="p-6">
           <p className="text-xs uppercase tracking-[0.3em] text-slate-400">Synthetic Data</p>
-          <h1 className="mt-2 text-xl font-semibold text-slate-900">GAN Control Room</h1>
-          <p className="mt-1 text-sm text-slate-500">End-to-end POC console</p>
+          <h1 className="mt-2 text-xl font-semibold text-slate-900">Rule-Based Control Room</h1>
+          <p className="mt-1 text-sm text-slate-500">Live orchestration console</p>
         </div>
 
         <nav className="flex gap-2 px-4 pb-4 md:flex-col md:gap-1 md:px-4 md:pb-6 overflow-x-auto">
@@ -189,7 +254,7 @@ const Dashboard = () => {
               <div>
                 <h2 className="text-2xl font-semibold text-slate-900">Pipeline Overview</h2>
                 <p className="text-sm text-slate-500">
-                  Monitor the live run, approve flagged columns, and launch new generations.
+                  Monitor the live run, approve flagged columns, and launch deterministic rule-based generations.
                 </p>
               </div>
               <div className="flex flex-wrap items-center gap-3">
@@ -204,7 +269,7 @@ const Dashboard = () => {
                   {runs.length === 0 && <option value="">No runs yet</option>}
                   {runs.map((run) => (
                     <option key={run.run_id} value={run.run_id}>
-                      {run.run_id.slice(0, 8)} | {run.status}
+                      {run.run_id.slice(0, 8)} | {run.source_name || 'default'} | {run.status}
                     </option>
                   ))}
                 </select>
@@ -281,8 +346,34 @@ const Dashboard = () => {
               <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h3 className="text-lg font-semibold text-slate-900">Launch a new run</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  Optional table list for a fast test. Leave blank for the full dataset.
+                  Optional table list for a focused test. Leave blank for the full dataset.
                 </p>
+                <div className="mt-4">
+                  <label className="text-xs font-semibold text-slate-500">Source database</label>
+                  <select
+                    value={selectedSourceName}
+                    onChange={(e) => setSelectedSourceName(e.target.value)}
+                    className="mt-2 w-full rounded-2xl border border-slate-200 bg-white p-3 text-sm text-slate-700"
+                  >
+                    {loadingSources && availableSources.length === 0 && (
+                      <option value="">Loading source databases...</option>
+                    )}
+                    {availableSources.map((source) => (
+                      <option key={source.name} value={source.name}>
+                        {source.label || source.name}
+                        {source.table_count != null ? ` • ${source.table_count} tables` : ''}
+                      </option>
+                    ))}
+                  </select>
+                  {selectedSource?.description && (
+                    <p className="mt-2 text-xs text-slate-500">
+                      {selectedSource.description}
+                    </p>
+                  )}
+                  <p className="mt-1 text-[11px] text-slate-400">
+                    Available now: Telecom Source DB and Retail Mini Demo DB.
+                  </p>
+                </div>
                 <div className="mt-4">
                   <label className="text-xs font-semibold text-slate-500">Table filter</label>
                   <textarea
@@ -294,22 +385,16 @@ const Dashboard = () => {
                   />
                 </div>
                 <div className="mt-4 flex flex-wrap items-center gap-4">
-                  <label className="flex items-center gap-2 text-sm text-slate-600">
-                    <input
-                      type="checkbox"
-                      checked={fastMode}
-                      onChange={(e) => setFastMode(e.target.checked)}
-                      className="h-4 w-4 rounded border-slate-300 text-slate-900"
-                    />
-                    Fast mode (rule-based only)
-                  </label>
+                  <div className="rounded-full bg-emerald-50 px-4 py-2 text-xs font-semibold uppercase tracking-[0.16em] text-emerald-700">
+                    Rule-based only
+                  </div>
                   <button
                     onClick={startPipeline}
                     disabled={starting}
                     className="ml-auto inline-flex items-center gap-2 rounded-full bg-slate-900 px-5 py-2 text-sm font-semibold text-white hover:bg-slate-800 disabled:opacity-60"
                   >
                     <PlayCircle size={16} />
-                    {starting ? 'Starting...' : 'Start pipeline'}
+                    {starting ? 'Starting...' : 'Start live run'}
                   </button>
                 </div>
                 {startMessage && <p className="mt-3 text-xs text-emerald-600">{startMessage}</p>}
@@ -319,9 +404,13 @@ const Dashboard = () => {
               <div className="rounded-3xl border border-slate-200 bg-white p-6 shadow-sm">
                 <h3 className="text-lg font-semibold text-slate-900">Run snapshot</h3>
                 <p className="mt-1 text-sm text-slate-500">
-                  {activeRun ? `Run ${activeRun.run_id.slice(0, 8)} is ${activeRun.status}.` : 'No active run selected.'}
+                  {activeRun ? `Run ${activeRun.run_id.slice(0, 8)} on ${activeRun.source_name || 'default'} is ${activeRun.status}.` : 'No active run selected.'}
                 </p>
                 <div className="mt-4 grid grid-cols-2 gap-4 text-sm">
+                  <div className="rounded-2xl bg-slate-50 p-4 col-span-2">
+                    <p className="text-xs text-slate-500">Source</p>
+                    <p className="mt-1 text-lg font-semibold text-slate-900">{activeRun?.source_name || selectedSourceName || 'default'}</p>
+                  </div>
                   <div className="rounded-2xl bg-slate-50 p-4">
                     <p className="text-xs text-slate-500">Tables</p>
                     <p className="mt-1 text-lg font-semibold text-slate-900">{stats?.total_tables || 0}</p>
@@ -373,7 +462,7 @@ const Dashboard = () => {
 
                     {item.llm_best_guess && (
                       <div className="mt-3 text-xs text-slate-500">
-                        Suggested: {item.llm_best_guess.pii_classification} · {item.llm_best_guess.masking_strategy}
+                        Suggested: {item.llm_best_guess.pii_classification} | {item.llm_best_guess.masking_strategy}
                       </div>
                     )}
 
@@ -412,7 +501,7 @@ const Dashboard = () => {
         )}
 
         {active === 'policies' && (
-          <ReasoningPanel embedded />
+          <ReasoningPanel runId={selectedRunId} embedded />
         )}
       </main>
     </div>
