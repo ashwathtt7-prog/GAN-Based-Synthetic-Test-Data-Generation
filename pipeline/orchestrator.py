@@ -964,6 +964,20 @@ class PipelineOrchestrator:
         )
         return max(1, min(configured_workers, pending_columns))
 
+    def _presidio_hit_is_implausible(self, column_name: str, pii_type: str) -> bool:
+        """Filter clearly-wrong Presidio hits on structural telecom columns."""
+        upper = (column_name or "").upper()
+        pii = (pii_type or "").upper()
+
+        date_like_tokens = ("DT", "DATE", "DOB", "TIME", "TM", "STRT", "END", "CREAT", "UPDT")
+        structural_tokens = ("_ID", "_NO", "_CD", "_FLG", "_AMT", "_QTY", "_CNT", "_SEQ", "_REF")
+
+        if pii == "DATE_TIME":
+            if any(token in upper for token in structural_tokens) and not any(token in upper for token in date_like_tokens):
+                return True
+
+        return False
+
     def _analyze_column_intelligence(self, connector, table_name: str, column, presidio) -> dict:
         """Classify a single column and return structured results for main-thread persistence."""
         try:
@@ -980,6 +994,17 @@ class PipelineOrchestrator:
             sample_vals = self._get_column_sample(connector, table_name, column.column_name)
             with self._presidio_scan_lock:
                 pres_result = presidio.scan_column(table_name, column.column_name, sample_vals)
+
+            if pres_result.pii_detected and self._presidio_hit_is_implausible(column.column_name, pres_result.pii_type):
+                logger.info(
+                    "Ignoring implausible Presidio hit for %s.%s (%s)",
+                    table_name,
+                    column.column_name,
+                    pres_result.pii_type,
+                )
+                pres_result.pii_detected = False
+                pres_result.pii_type = None
+                pres_result.confidence = 0.0
 
             if pres_result.pii_detected and pres_result.confidence >= self.config["presidio"].get("confidence_threshold", 0.7):
                 masking_strategy = presidio.is_pii_passthrough(pres_result.pii_type)

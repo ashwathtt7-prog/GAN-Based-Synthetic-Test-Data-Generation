@@ -1,7 +1,7 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
 import axios from 'axios';
-import { Maximize2, X, Focus } from 'lucide-react';
+import { Maximize2, X } from 'lucide-react';
 
 const API_BASE = "http://localhost:8001/api";
 
@@ -18,15 +18,12 @@ const GraphView = ({
   embedded = false,
   sourceName = null,
   runId = null,
-  focusTable = null,
   onSelectTable = null,
 }) => {
   const [graphData, setGraphData] = useState({ nodes: [], links: [] });
   const [selectedNode, setSelectedNode] = useState(null);
   const [tableDetail, setTableDetail] = useState(null);
   const [loading, setLoading] = useState(true);
-  const [focusMode, setFocusMode] = useState(Boolean(focusTable));
-  const [hops, setHops] = useState(1);
   const [containerSize, setContainerSize] = useState({ width: 600, height: 500 });
   const [error, setError] = useState('');
   const fgRef = useRef();
@@ -49,10 +46,6 @@ const GraphView = ({
     return () => observer.disconnect();
   }, []);
 
-  useEffect(() => {
-    setFocusMode(Boolean(focusTable));
-  }, [focusTable]);
-
   const fetchGraph = useCallback(async () => {
     setLoading(true);
     setError('');
@@ -60,10 +53,6 @@ const GraphView = ({
       const params = {};
       if (sourceName) params.source_name = sourceName;
       if (runId) params.run_id = runId;
-      if (focusMode && focusTable) {
-        params.focus_table = focusTable;
-        params.hops = hops;
-      }
       const res = await axios.get(`${API_BASE}/graph`, { params });
       const { nodes = [], edges = [], error: apiError } = res.data || {};
       if (apiError) {
@@ -97,7 +86,7 @@ const GraphView = ({
     } finally {
       setLoading(false);
     }
-  }, [sourceName, runId, focusMode, focusTable, hops]);
+  }, [sourceName, runId]);
 
   useEffect(() => {
     fetchGraph();
@@ -111,7 +100,7 @@ const GraphView = ({
     const timer = setTimeout(() => {
       try {
         fgRef.current?.zoomToFit(500, 60);
-      } catch (err) {
+      } catch {
         // ignore – fitting can briefly fail during rapid remounts
       }
     }, 450);
@@ -204,9 +193,8 @@ const GraphView = ({
     parts.push(`${graphData.nodes.length} tables`);
     parts.push(`${graphData.links.length} relationships`);
     if (sourceName) parts.push(`source: ${sourceName}`);
-    if (focusMode && focusTable) parts.push(`focus: ${focusTable}`);
     return parts.join(' | ');
-  }, [graphData, sourceName, focusMode, focusTable]);
+  }, [graphData, sourceName]);
 
   const panel = (
     <div className="flex h-full flex-col overflow-hidden rounded-[28px] border border-slate-200 bg-white shadow-sm">
@@ -217,35 +205,6 @@ const GraphView = ({
         </div>
 
         <div className="flex items-center gap-3 flex-wrap">
-          {focusTable && (
-            <button
-              onClick={() => setFocusMode((value) => !value)}
-              className={`flex items-center gap-2 rounded-full border px-3 py-1.5 text-xs font-medium transition ${
-                focusMode
-                  ? 'bg-amber-100 text-amber-800 border-amber-200'
-                  : 'bg-white text-slate-600 border-slate-200 hover:bg-slate-50'
-              }`}
-              title="Toggle focus-on-selected-table subgraph"
-            >
-              <Focus size={14} />
-              {focusMode ? `Focus: ${focusTable}` : 'Show full graph'}
-            </button>
-          )}
-          {focusMode && (
-            <label className="flex items-center gap-2 text-xs text-slate-500">
-              Hops
-              <select
-                value={hops}
-                onChange={(e) => setHops(Number(e.target.value))}
-                className="rounded-md border border-slate-200 bg-white px-2 py-1 text-xs"
-              >
-                <option value={1}>1</option>
-                <option value={2}>2</option>
-                <option value={3}>3</option>
-              </select>
-            </label>
-          )}
-
           <div className="hidden flex-wrap gap-3 text-xs text-slate-500 xl:flex">
             {Object.entries(DOMAIN_COLORS).filter(([k]) => k !== 'unknown').map(([domain, color]) => (
               <span key={domain} className="flex items-center gap-1">
@@ -306,7 +265,7 @@ const GraphView = ({
               onEngineStop={() => {
                 try {
                   fgRef.current?.zoomToFit(400, 60);
-                } catch (err) {
+                } catch {
                   // ignore
                 }
               }}

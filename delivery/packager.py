@@ -137,8 +137,45 @@ class DeliveryPackager:
                     export_df[column] = series.map(
                         lambda value: value.isoformat() if isinstance(value, (pd.Timestamp, datetime)) else value
                     )
+                    series = export_df[column]
+                    non_null = series.dropna()
+
+                python_types = {type(value) for value in non_null}
+                contains_binary = any(isinstance(value, (bytes, bytearray)) for value in non_null)
+                is_all_string = all(isinstance(value, str) for value in non_null)
+                is_all_collection = all(isinstance(value, (dict, list, tuple, set)) for value in non_null)
+
+                if is_all_collection:
+                    export_df[column] = series.map(
+                        lambda value: json.dumps(value, default=str) if value is not None else None
+                    )
+                    continue
+
+                if len(python_types) > 1 or contains_binary or not is_all_string:
+                    logger.info(
+                        "[Delivery] Coercing object column %s to string-compatible values for export.",
+                        column,
+                    )
+                    export_df[column] = series.map(self._stringify_export_value)
 
         return export_df
+
+    def _stringify_export_value(self, value):
+        """Convert mixed object values into parquet-safe string representations."""
+        if value is None:
+            return None
+        if isinstance(value, (pd.Timestamp, datetime)):
+            return value.isoformat()
+        if isinstance(value, float) and pd.isna(value):
+            return None
+        if isinstance(value, (bytes, bytearray)):
+            try:
+                return value.decode("utf-8")
+            except Exception:
+                return value.hex()
+        if isinstance(value, (dict, list, tuple, set)):
+            return json.dumps(value, default=str)
+        return str(value)
 
     def _parquet_engine_available(self) -> bool:
         """Return True when pandas has an installed parquet backend to use."""

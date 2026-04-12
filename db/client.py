@@ -88,6 +88,7 @@ class DatabaseClient:
         init_db(self.engine)
         self.ensure_schema_compatibility()
         self.backfill_legacy_source_names()
+        self.prune_invalid_cached_policies()
         self.mark_incomplete_runs_failed()
 
     def ensure_schema_compatibility(self):
@@ -192,6 +193,47 @@ class DatabaseClient:
                     text(f"UPDATE {table_name} SET source_name = :source_name WHERE source_name IS NULL"),
                     {"source_name": default_source_name},
                 )
+
+    def prune_invalid_cached_policies(self):
+        """Drop cached policies that no longer match the real source schema."""
+        from db.schema import ColumnPolicy
+
+        source_schema: dict[str, dict[str, set[str]]] = {}
+        for source in self.config.get("data_sources", []) or []:
+            source_name = source.get("name")
+            conn_str = source.get("connection_string")
+            if not source_name or not conn_str:
+                continue
+            try:
+                inspector = inspect(create_engine(conn_str))
+                table_map: dict[str, set[str]] = {}
+                for table_name in inspector.get_table_names():
+                    if str(table_name).startswith("_"):
+                        continue
+                    try:
+                        table_map[table_name] = {
+                            col["name"] for col in inspector.get_columns(table_name)
+                        }
+                    except Exception:
+                        continue
+                source_schema[source_name] = table_map
+            except Exception:
+                continue
+
+        with self.session() as session:
+            policies = session.query(ColumnPolicy).all()
+            for policy in policies:
+                if str(policy.table_name or "").startswith("_"):
+                    session.delete(policy)
+                    continue
+
+                source_tables = source_schema.get(policy.source_name or "")
+                if not source_tables:
+                    continue
+
+                valid_columns = source_tables.get(policy.table_name)
+                if not valid_columns or policy.column_name not in valid_columns:
+                    session.delete(policy)
 
     @contextmanager
     def session(self):

@@ -543,7 +543,6 @@ const Dashboard = () => {
             embedded
             sourceName={selectedSourceName}
             runId={selectedRunId}
-            focusTable={selectedTable}
             onSelectTable={setSelectedTable}
           />
         )}

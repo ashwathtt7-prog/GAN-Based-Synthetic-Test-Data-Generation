@@ -143,11 +143,23 @@ def get_dashboard_stats(run_id: str | None = None):
             table_query = table_query.filter_by(source_name=source_name)
             policy_query = policy_query.filter_by(source_name=source_name)
 
-        total_tables = table_query.count()
-        domains = [d[0] for d in table_query.with_entities(db_models.TableMetadataRecord.domain).distinct().all() if d[0]]
+        table_records = [
+            record for record in table_query.all()
+            if not _is_internal_source_table(record.table_name)
+        ]
+        policy_records = [
+            record for record in policy_query.all()
+            if not _is_internal_source_table(record.table_name)
+        ]
 
-        total_columns = policy_query.count()
-        pii_cols = policy_query.filter(db_models.ColumnPolicy.pii_classification != 'none').count()
+        total_tables = len(table_records)
+        domains = sorted({record.domain for record in table_records if record.domain})
+
+        total_columns = len(policy_records)
+        pii_cols = sum(
+            1 for record in policy_records
+            if record.pii_classification != 'none'
+        )
         pending_query = session.query(db_models.HumanReviewQueue).filter(
             db_models.HumanReviewQueue.status == 'pending'
         )
@@ -309,7 +321,7 @@ def list_data_sources():
         try:
             engine = create_engine(source["connection_string"])
             inspector = sqlalchemy_inspect(engine)
-            table_names = inspector.get_table_names()
+            table_names = _visible_source_tables(inspector.get_table_names())
             table_count = len(table_names)
         except Exception:
             table_count = None
@@ -533,6 +545,18 @@ def _json_safe(value):
     return value
 
 
+def _is_internal_source_table(table_name: str | None) -> bool:
+    """Internal helper tables should stay usable in the backend, not visible in the demo."""
+    return bool(table_name) and str(table_name).startswith("_")
+
+
+def _visible_source_tables(table_names: list[str]) -> list[str]:
+    return sorted(
+        table_name for table_name in table_names
+        if not _is_internal_source_table(table_name)
+    )
+
+
 def _get_run_source_name(session, run_id: str | None) -> str | None:
     if not run_id:
         return None
@@ -549,7 +573,7 @@ def _get_source_engine(source_name: str | None = None):
 def _get_source_table_names(source_name: str | None = None) -> list[str]:
     try:
         engine = _get_source_engine(source_name=source_name)
-        return sorted(sqlalchemy_inspect(engine).get_table_names())
+        return _visible_source_tables(sqlalchemy_inspect(engine).get_table_names())
     except Exception as exc:
         logger.warning(f"Failed to inspect source database tables: {exc}")
         return []
@@ -1006,6 +1030,8 @@ def get_data_tables(run_id: str | None = None, source_name: str | None = None):
     manifest_entries = _build_manifest_generation_entries(run_id=run_id)
     latest_generated = {}
     for entry in manifest_entries:
+        if _is_internal_source_table(entry["table_name"]):
+            continue
         latest_generated.setdefault(entry["table_name"], entry)
 
     with db_client.session() as session:
@@ -1015,7 +1041,10 @@ def get_data_tables(run_id: str | None = None, source_name: str | None = None):
         table_meta_query = session.query(db_models.TableMetadataRecord)
         if resolved_source_name is not None:
             table_meta_query = table_meta_query.filter_by(source_name=resolved_source_name)
-        table_meta = table_meta_query.all()
+        table_meta = [
+            record for record in table_meta_query.all()
+            if not _is_internal_source_table(record.table_name)
+        ]
         meta_map = {t.table_name: t for t in table_meta}
 
     all_tables = sorted(set(source_tables) | set(latest_generated.keys()) | set(meta_map.keys()))

@@ -149,6 +149,11 @@ This table belongs to domain: {graph_context['domain']}
                 retry_on_failure=True
             )
 
+            # Persist and cache policies against the real schema identifiers,
+            # even if the model echoes back expanded display names.
+            policy.column_name = column_name_raw
+            policy.table_name = table_name
+
             # Step 4: Write classification back to the knowledge graph
             self.kg.update_column_policy(table_name, column_name_raw, {
                 "pii_classification": policy.pii_classification,

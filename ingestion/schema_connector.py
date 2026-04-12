@@ -18,6 +18,11 @@ from models.schemas import TableMetadata, StatisticalProfile
 logger = logging.getLogger(__name__)
 
 
+def _is_internal_table(table_name: str) -> bool:
+    """Hide backend-only helper tables from the live schema pipeline."""
+    return str(table_name).startswith("_")
+
+
 @dataclass
 class _SimpleColumn:
     """Lightweight stand-in for SQLAlchemy ``Column`` used by the DuckDB path."""
@@ -65,6 +70,8 @@ class SchemaConnector:
                 )
             ).fetchall()
         for table_name, column_name, data_type in rows:
+            if _is_internal_table(table_name):
+                continue
             tables.setdefault(table_name, _SimpleTable(name=table_name)).columns.append(
                 _SimpleColumn(name=column_name, type=data_type)
             )
@@ -82,6 +89,8 @@ class SchemaConnector:
                 yield name, table
         else:
             for name, table in self.metadata.tables.items():
+                if _is_internal_table(name):
+                    continue
                 yield name, table
 
     # ------------------------------------------------------------------ #

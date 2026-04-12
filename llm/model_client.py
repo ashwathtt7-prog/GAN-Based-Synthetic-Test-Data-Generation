@@ -7,6 +7,7 @@ The rest of the system never imports Gemini or Ollama directly — always uses M
 import json
 import yaml
 import logging
+import threading
 from pathlib import Path
 from typing import Type, Optional
 
@@ -256,13 +257,15 @@ class ModelClient:
         )
 
 
-# Singleton instance for convenience
-_client_instance: Optional[ModelClient] = None
+# Keep one model client per thread so parallel classification does not force
+# multiple worker threads through a shared provider client.
+_thread_local = threading.local()
 
 
 def get_model_client(config: dict = None) -> ModelClient:
-    """Get or create a singleton ModelClient instance."""
-    global _client_instance
-    if _client_instance is None:
-        _client_instance = ModelClient(config)
-    return _client_instance
+    """Get or create a thread-local ModelClient instance."""
+    client = getattr(_thread_local, "client", None)
+    if client is None or config is not None:
+        client = ModelClient(config)
+        _thread_local.client = client
+    return client

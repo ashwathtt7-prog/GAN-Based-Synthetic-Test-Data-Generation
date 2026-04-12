@@ -82,20 +82,22 @@ class EdgeCaseEngine:
 
     def _apply_edge_case(self, record: dict, column: str, flag: str, baseline_df: pd.DataFrame) -> dict:
         """Apply a specific edge case modification to a record."""
+        is_numeric_column = column in baseline_df.columns and pd.api.types.is_numeric_dtype(baseline_df[column])
+
         # Interpret common edge case flag patterns
         if "null" in flag or "missing" in flag:
             record[column] = None
         elif "zero" in flag:
-            record[column] = 0
+            record[column] = 0 if is_numeric_column else "0"
         elif "negative" in flag:
-            if isinstance(record.get(column), (int, float)):
+            if is_numeric_column and isinstance(record.get(column), (int, float, np.integer, np.floating)):
                 record[column] = -abs(record[column]) if record[column] else -1
         elif "max" in flag or "extreme" in flag or "boundary" in flag:
-            if column in baseline_df.columns and pd.api.types.is_numeric_dtype(baseline_df[column]):
+            if is_numeric_column:
                 col_max = baseline_df[column].max()
                 record[column] = col_max * 1.5 if col_max else 999999
         elif "min" in flag:
-            if column in baseline_df.columns and pd.api.types.is_numeric_dtype(baseline_df[column]):
+            if is_numeric_column:
                 col_min = baseline_df[column].min()
                 record[column] = col_min * 0.5 if col_min else 0
         elif "duplicate" in flag:
@@ -113,7 +115,7 @@ class EdgeCaseEngine:
                 record[column] = record[column] + "!@#$%" if record[column] else "!@#$%"
         else:
             # Generic: set to an outlier value
-            if column in baseline_df.columns and pd.api.types.is_numeric_dtype(baseline_df[column]):
+            if is_numeric_column:
                 std = baseline_df[column].std()
                 mean = baseline_df[column].mean()
                 record[column] = mean + 3 * std if std else mean * 2
