@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef, useCallback, useMemo } from 'react';
 import ForceGraph2D from 'react-force-graph-2d';
+import { forceCollide } from 'd3-force-3d';
 import axios from 'axios';
 import { Maximize2, X } from 'lucide-react';
 
@@ -67,7 +68,7 @@ const GraphView = ({
         column_count: n.column_count,
         pii_columns: n.pii_columns,
         color: DOMAIN_COLORS[n.domain] || DOMAIN_COLORS.unknown,
-        val: Math.max(4, Math.min(20, Math.log10(Math.max(n.row_count || 0, 1) + 1) * 4 + 4)),
+        val: Math.max(3, Math.min(12, Math.log10(Math.max(n.row_count || 0, 1) + 1) * 2.5 + 3)),
         _focused: Boolean(n._focused),
       }));
 
@@ -92,6 +93,24 @@ const GraphView = ({
     fetchGraph();
   }, [fetchGraph]);
 
+  // Spread nodes further apart with stronger repulsion and a larger
+  // collision radius. This is purely visual tuning for readability and
+  // does not change graph data or any backend logic.
+  useEffect(() => {
+    const fg = fgRef.current;
+    if (!fg) return;
+    fg.d3Force('charge')?.strength(-2200).distanceMax(1400);
+    fg.d3Force('link')?.distance(340);
+    fg.d3Force('center')?.strength(0.025);
+    fg.d3Force(
+      'collide',
+      forceCollide()
+        .radius((node) => (node.val || 5) + 52)
+        .strength(1)
+        .iterations(6)
+    );
+  }, [graphData]);
+
   // Fit the graph to view once the simulation settles. Uses a safe timeout
   // fallback for large graphs where onEngineStop may fire before the canvas
   // has a chance to lay out.
@@ -99,7 +118,7 @@ const GraphView = ({
     if (!graphData.nodes.length) return;
     const timer = setTimeout(() => {
       try {
-        fgRef.current?.zoomToFit(500, 60);
+        fgRef.current?.zoomToFit(700, 40);
       } catch {
         // ignore – fitting can briefly fail during rapid remounts
       }
@@ -160,8 +179,8 @@ const GraphView = ({
     const ty = link.target?.y;
     if ([sx, sy, tx, ty].some((v) => v == null || Number.isNaN(v))) return;
 
-    ctx.strokeStyle = 'rgba(148, 163, 184, 0.45)';
-    ctx.lineWidth = 1;
+    ctx.strokeStyle = 'rgba(148, 163, 184, 0.7)';
+    ctx.lineWidth = 1.5;
     ctx.beginPath();
     ctx.moveTo(sx, sy);
     ctx.lineTo(tx, ty);
@@ -174,16 +193,16 @@ const GraphView = ({
     const arrowX = tx - Math.cos(angle) * targetR;
     const arrowY = ty - Math.sin(angle) * targetR;
 
-    ctx.fillStyle = 'rgba(148, 163, 184, 0.75)';
+    ctx.fillStyle = 'rgba(148, 163, 184, 0.9)';
     ctx.beginPath();
     ctx.moveTo(arrowX, arrowY);
     ctx.lineTo(
-      arrowX - 4 * Math.cos(angle - Math.PI / 6),
-      arrowY - 4 * Math.sin(angle - Math.PI / 6)
+      arrowX - 6 * Math.cos(angle - Math.PI / 6),
+      arrowY - 6 * Math.sin(angle - Math.PI / 6)
     );
     ctx.lineTo(
-      arrowX - 4 * Math.cos(angle + Math.PI / 6),
-      arrowY - 4 * Math.sin(angle + Math.PI / 6)
+      arrowX - 6 * Math.cos(angle + Math.PI / 6),
+      arrowY - 6 * Math.sin(angle + Math.PI / 6)
     );
     ctx.fill();
   }, []);
@@ -258,13 +277,13 @@ const GraphView = ({
                 ctx.fill();
               }}
               backgroundColor="#0b1020"
-              cooldownTicks={Math.min(200, Math.max(80, graphData.nodes.length * 4))}
+              cooldownTicks={Math.min(320, Math.max(140, graphData.nodes.length * 8))}
               linkDirectionalArrowLength={0}
-              d3VelocityDecay={0.35}
-              warmupTicks={20}
+              d3VelocityDecay={0.22}
+              warmupTicks={70}
               onEngineStop={() => {
                 try {
-                  fgRef.current?.zoomToFit(400, 60);
+                  fgRef.current?.zoomToFit(600, 40);
                 } catch {
                   // ignore
                 }

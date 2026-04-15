@@ -199,3 +199,45 @@ class PipelineStepLog(Base):
     started_at = Column(DateTime, default=datetime.utcnow)
     completed_at = Column(DateTime)
     duration_seconds = Column(Float)
+
+
+class DefectRuleConfig(Base):
+    """Source-specific override and review state for production-defect rules."""
+    __tablename__ = "defect_rule_config"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    source_name = Column(String, nullable=False)
+    rule_key = Column(String, nullable=False)
+    table_name = Column(String, nullable=False)
+    column_name = Column(String, nullable=False)
+    defect_type = Column(String, nullable=False)
+    default_failure_reason = Column(Text)
+    default_severity = Column(String)
+    action_mode = Column(String, default="flag")  # flag, allow, customize
+    review_status = Column(String, default="pending")  # pending, approved, rejected
+    llm_suggestion = Column(JSON)
+    human_notes = Column(Text)
+    custom_failure_reason = Column(Text)
+    custom_severity = Column(String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+    updated_at = Column(DateTime, default=datetime.utcnow, onupdate=datetime.utcnow)
+
+    __table_args__ = (
+        UniqueConstraint("source_name", "rule_key", name="uq_defect_rule_source_rule"),
+    )
+
+
+class FailedCaseScenario(Base):
+    """Stores generated failed-case scenario bundles for audit and reload."""
+    __tablename__ = "failed_case_scenario"
+
+    id = Column(Integer, primary_key=True, autoincrement=True)
+    scenario_id = Column(String, nullable=False, unique=True)
+    source_name = Column(String, nullable=False)
+    root_table = Column(String, nullable=False)
+    id_column = Column(String, nullable=False)
+    id_value = Column(String, nullable=False)
+    display_label = Column(String)
+    trace_payload = Column(JSON)
+    synthetic_payload = Column(JSON)
+    created_at = Column(DateTime, default=datetime.utcnow)

@@ -222,3 +222,62 @@ class DashboardStats(BaseModel):
     domains: list[str] = []
     latest_run_status: Optional[str] = None
     validation_pass_rate: float = 0.0
+
+
+class DefectRuleSuggestionSchema(BaseModel):
+    """LLM suggestion for how a production-defect rule should be treated."""
+    rule_key: str
+    recommended_action: Literal["flag", "allow", "customize"]
+    rationale: str
+    adjusted_failure_reason: str = ""
+    adjusted_severity: Literal["critical", "high", "medium"] = "medium"
+    edge_case_guidance: str = ""
+    confidence: float = Field(ge=0.0, le=1.0)
+
+
+class DefectRuleProposalRequest(BaseModel):
+    source_name: str
+    action_mode: Literal["flag", "allow", "customize"]
+    human_notes: str = ""
+
+
+class DefectRuleApprovalRequest(BaseModel):
+    source_name: str
+    action_mode: Literal["flag", "allow", "customize"]
+    human_notes: str = ""
+    custom_failure_reason: Optional[str] = None
+    custom_severity: Optional[Literal["critical", "high", "medium"]] = None
+
+
+class DefectRuleConfigItem(BaseModel):
+    source_name: str
+    rule_key: str
+    table_name: str
+    column_name: str
+    defect_type: str
+    default_failure_reason: str
+    default_severity: str
+    action_mode: str = "flag"
+    review_status: str = "pending"
+    llm_suggestion: Optional[dict] = None
+    human_notes: Optional[str] = None
+    custom_failure_reason: Optional[str] = None
+    custom_severity: Optional[str] = None
+
+
+class FailedCaseOption(BaseModel):
+    table_name: str
+    label: str
+    id_column: str
+
+
+class FailedCaseValueOption(BaseModel):
+    value: str
+    label: str
+
+
+class FailedCaseRequest(BaseModel):
+    source_name: str
+    table_name: str
+    id_column: str
+    id_value: str

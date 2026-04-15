@@ -850,10 +850,21 @@ class PipelineOrchestrator:
             # database, with its actual primary key and actual bad value.
             try:
                 defect_detector = ProductionDefectDetector()
+                with self.db_client.session() as session:
+                    rule_overrides = {
+                        config.rule_key: {
+                            "action_mode": config.action_mode,
+                            "review_status": config.review_status,
+                            "custom_failure_reason": config.custom_failure_reason,
+                            "custom_severity": config.custom_severity,
+                        }
+                        for config in self.db_client.get_defect_rule_configs(session, self.source_name)
+                    }
                 defect_reports = defect_detector.detect(
                     engine=connector.engine,
                     relationships=all_rels,
                     table_filter=table_filter,
+                    rule_overrides=rule_overrides,
                 )
                 payload = reports_to_api_payload(
                     defect_reports,

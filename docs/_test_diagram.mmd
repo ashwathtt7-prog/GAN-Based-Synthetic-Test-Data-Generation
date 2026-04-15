@@ -1,0 +1,368 @@
+flowchart TB
+
+  classDef source fill:#e8f4fd,stroke:#2196f3,stroke-width:2px,color:#0d47a1
+  classDef phase  fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100
+  classDef llm    fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f
+  classDef kg     fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px,color:#1a237e
+  classDef rule   fill:#e0f2f1,stroke:#009688,stroke-width:2px,color:#004d40
+  classDef vld    fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#4a148c
+  classDef out    fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20
+  classDef human  fill:#fff8e1,stroke:#ffc107,stroke-width:2px,color:#f57f17
+  classDef db     fill:#efebe9,stroke:#795548,stroke-width:2px,color:#3e2723
+  classDef fc     fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1
+
+  subgraph SOURCES["DATA SOURCES : Backend-Agnostic Input"]
+    direction LR
+    S1["SQLite OLTP
+telecom_source.db
+22 tables, ~200k rows"]:::source
+    S2["DuckDB Warehouse
+telecom_dw.duckdb
+Columnar OLAP"]:::source
+    S3["DuckDB Parquet Lake
+telecom_lake.duckdb
+Views over .parquet files"]:::source
+  end
+
+  subgraph P1["PHASE 1 : Schema Ingestion"]
+    direction TB
+    P1A["SchemaConnector
+SQLAlchemy reflection for SQLite
+info_schema introspection for DuckDB"]:::phase
+    P1B["DDL Parser
+sqlglot extracts explicit FK
+constraints from DDL files"]:::phase
+    P1C["Query Log Miner
+Mines implicit JOIN patterns
+from historical SQL logs"]:::phase
+    P1D["Merge Relationships
+Explicit FKs + Implicit JOINs
+into unified relationship list"]:::phase
+  end
+
+  SOURCES --> P1A
+  P1A --> P1D
+  P1B --> P1D
+  P1C --> P1D
+
+  subgraph P2["PHASE 2 : Knowledge Graph Construction"]
+    direction TB
+    P2A["Build In-Memory Graph
+NetworkX
+Tables = Nodes, FKs = Edges"]:::kg
+    P2B["Abbreviation Dictionary
+CUST=Customer, BLNG=Billing
+NTWK=Network, PYMT=Payment"]:::kg
+  end
+
+  P1D --> P2A
+  P2B --> P2A
+
+  subgraph P3["PHASE 3 : Domain Partitioning"]
+    direction TB
+    P3A{"Louvain Community
+Detection
+on knowledge graph"}:::kg
+    P3B["Heuristic Fallback
+keyword to domain mapping
+if Louvain fails"]:::phase
+    P3C["Domain Map
+customer_management
+billing_revenue
+network_operations"]:::kg
+  end
+
+  P2A --> P3A
+  P3A -->|"success"| P3C
+  P3A -->|"fail"| P3B
+  P3B --> P3C
+
+  subgraph P4["PHASE 4 : Intelligence and Semantic Reasoning"]
+    direction TB
+
+    subgraph PII_SUB["Step 4.1 : PII Detection"]
+      P4A["Presidio Scanner
+spaCy NER + custom recognizers
+SSN, IMSI, Subscriber ID"]:::phase
+    end
+
+    subgraph ABBR_SUB["Step 4.2 : Abbreviation Resolution"]
+      P4B["Knowledge Graph Lookup
+Expand column name tokens
+via abbreviation dictionary"]:::kg
+    end
+
+    subgraph LLM_SUB["Step 4.3 : LLM Column Classification, parallelized"]
+      P4C["Gather Graph Context
+: Sibling columns
+: FK relationships
+: Downstream tables
+: Abbreviation expansions
+: Business domain"]:::kg
+      P4D["LLM CALL 1
+Gemini or Ollama
+Full graph context in prompt
+Output: ColumnPolicySchema"]:::llm
+      P4E["Column Policy
+: PII classification
+: Masking strategy
+: Constraint profile
+: Business importance
+: Dedup mode, Edge case flags"]:::llm
+    end
+
+    subgraph REV_SUB["Step 4.4 : Human Review Gate"]
+      P4F{"Confidence
+below threshold?"}:::human
+      P4G["Human Review Queue
+approve / correct / skip
+blocks pipeline until resolved"]:::human
+    end
+
+    subgraph STRAT_SUB["Step 4.5 : Generation Strategy"]
+      P4H["LLM CALL 2
+Strategy Planner
+Input: all column policies
+Output: GenerationStrategySchema"]:::llm
+      P4I["Strategy
+: Temporal constraints
+: Post-generation rules
+: Edge case injection pct"]:::llm
+    end
+  end
+
+  P3C --> P4A
+  P3C --> P4B
+  P4A --> P4C
+  P4B --> P4C
+  P4C --> P4D
+  P4D --> P4E
+  P4E --> P4F
+  P4F -->|"low confidence"| P4G
+  P4F -->|"high confidence"| P4H
+  P4G -->|"approved"| P4H
+  P4E --> P4H
+  P4H --> P4I
+
+  subgraph P5["PHASE 5 : Synthetic Data Generation, Rule-Based"]
+    direction TB
+    P5A["Topological Sort
+Parent tables generated first
+to satisfy FK ordering"]:::rule
+    P5B["PII Masking Engine
+Faker-based realistic
+substitutions on source data"]:::rule
+    P5C["Table Profiling
+: Structural cols: PK, FK, status, date
+: Modeled cols: free-form values
+: Sensitive cols: PII flagged"]:::rule
+    P5D["Structural Generator
+Deterministic: PKs, FKs,
+allowed values, dates, codes"]:::rule
+    P5E["Rule-Based Generator
+Distribution sampling for
+modeled columns"]:::rule
+    P5F["Shared Repairs
+: FK stitching to parent tables
+: Allowed-value enforcement
+: Temporal constraint fixes
+: Uniqueness checks"]:::rule
+    P5G["Boundary Key Registry
+Cross-domain FK stitching
+persisted to operational DB"]:::db
+    P5H["Edge Case Injection
+NULLs, zeros, min/max,
+boundary values, duplicates"]:::rule
+    P5I["Dedup Engine
+SHA-256 mode-aware
+entity / reference / event"]:::rule
+  end
+
+  P4I --> P5A
+  P5A --> P5B
+  P5B --> P5C
+  P5C --> P5D
+  P5D --> P5E
+  P5E --> P5F
+  P5F --> P5G
+  P5G --> P5H
+  P5H --> P5I
+
+  subgraph P6["PHASE 6 : Validation Gate"]
+    direction TB
+    P6A["Statistical Fidelity
+KS Test + Jensen-Shannon
+Divergence per column"]:::vld
+    P6B["PII Leakage Check
+Presidio re-scan +
+re-identification risk score"]:::vld
+    P6C["Lineage Integrity
+FK referential checks
+across all generated tables"]:::vld
+    P6D["Business Rule Assertions
+Rules from strategy post_generation_rules"]:::vld
+    P6E{"All checks
+passed?"}:::vld
+    P6F["LLM CALL 3
+Failure Diagnosis Agent
+Root cause + strategy update
+retry loop, max 3"]:::llm
+  end
+
+  P5I --> P6A
+  P5I --> P6B
+  P5I --> P6C
+  P5I --> P6D
+  P6A --> P6E
+  P6B --> P6E
+  P6C --> P6E
+  P6D --> P6E
+  P6E -->|"failures"| P6F
+  P6F -.->|"retry with updated strategy"| P5D
+
+  subgraph P7["PHASE 7 : Delivery and Defect Detection"]
+    direction TB
+    P7A["Delivery Packager
+Parquet or CSV + gzip
++ manifest.json"]:::out
+    P7B["Production Defect Detector
+SQL validators against live source DB
+Reports only REAL bad rows
+Respects rule overrides"]:::out
+    P7C["Output Bundle
+production_defects.json
+actual PKs + cross-table impact"]:::out
+  end
+
+  P6E -->|"pass"| P7A
+  SOURCES -.->|"live SQL scan"| P7B
+  P7A --> P7C
+  P7B --> P7C
+
+  subgraph OUTGRP["OUTPUT"]
+    direction LR
+    O1["output/synthetic/run_id/
+: .parquet per table
+: manifest.json
+: production_defects.json"]:::out
+  end
+
+  P7C --> O1
+
+  subgraph EC["FEATURE : Customizable Edge Case Detection"]
+    direction TB
+
+    subgraph EC_RULES["Defect Rule Catalog"]
+      EC1["13 SQL Validator Rules
+negative_balance, ssn_wrong_length,
+email_invalid, fk_dangling, etc.
+Each: table, column, WHERE, severity"]:::vld
+    end
+
+    subgraph EC_HITL["Human-in-the-Loop Customization"]
+      EC2["Human Reviews Each Rule
+Flag = keep detecting
+Allow = stop flagging
+Customize = change severity or reason"]:::human
+      EC3["LLM CALL 4
+Rule Analyzer
+Analyzes rule in business context
+Suggests action + rationale"]:::llm
+      EC4{"Human Decision"}:::human
+      EC5["DefectRuleConfig saved
+action_mode: flag / allow / customize
+custom_severity, custom_reason
+review_status: approved"]:::db
+    end
+  end
+
+  P7B -.->|"rule catalog"| EC1
+  EC1 --> EC2
+  EC2 -->|"Ask LLM"| EC3
+  EC3 --> EC4
+  EC2 --> EC4
+  EC4 -->|"approve / reject / customize"| EC5
+  EC5 -.->|"overrides applied
+next defect scan"| P7B
+
+  subgraph FCS["FEATURE : Failed Case Replication"]
+    direction TB
+
+    subgraph FCS_INPUT["User Input : Failed ID"]
+      FC1["Select Root Table
+dropdown of traceable tables"]:::fc
+      FC2["Select ID Column
+inferred PK or _ID/_NO columns"]:::fc
+      FC3["Select Failed ID Value
+dropdown of actual values"]:::fc
+    end
+
+    subgraph FCS_TRACE["BFS Trace Across Tables"]
+      FC4["Trace Case Service
+BFS traversal of FK relationships
+max depth: 3 levels"]:::fc
+      FC5["Root Row + Related Rows
+upstream parent tables
+downstream child tables
+relationship metadata"]:::fc
+    end
+
+    subgraph FCS_GEN["Synthetic Replica Generation"]
+      FC6["Load Column Policies
+from operational DB"]:::fc
+      FC7["PII Masking Engine
+consistent value mapping
+names, SSNs, emails replaced
+FK values preserved"]:::rule
+      FC8["Synthetic Scenario Bundle
+scenario_id stored in DB
+masked rows for all related tables"]:::fc
+    end
+  end
+
+  SOURCES -.->|"query source rows"| FC4
+  FC1 --> FC2
+  FC2 --> FC3
+  FC3 -->|"trace"| FC4
+  FC4 --> FC5
+  FC5 -->|"generate"| FC6
+  FC6 --> FC7
+  FC7 --> FC8
+  ODB -.->|"column policies"| FC6
+  FC8 -.->|"scenario saved"| ODB
+
+  subgraph DASH["REACT DASHBOARD : localhost:5173"]
+    direction LR
+    D1["Pipeline
+Progress"]:::source
+    D2["Human
+Review"]:::human
+    D3["Policy Viewer
++ LLM Reasoning"]:::llm
+    D4["Data
+Comparison"]:::source
+    D5["Edge Cases
++ Rule Customization"]:::vld
+    D6["Knowledge
+Graph Viz"]:::kg
+    D7["Failed Cases
+Replication"]:::fc
+  end
+
+  O1 --> DASH
+  P4G -.->|"flagged items"| D2
+  EC5 -.->|"rule overrides"| D5
+  FC8 -.->|"scenario results"| D7
+
+  ODB[("Operational DB
+synthetic_data.db
+Policies, Strategies
+Run logs, Review queue
+Boundary keys, Model registry
+DefectRuleConfig
+FailedCaseScenario")]:::db
+
+  P4E -.->|"persist policies"| ODB
+  P4I -.->|"persist strategies"| ODB
+  ODB -.->|"cache hit = skip LLM"| P4D
+  P5G -.->|"boundary keys"| ODB

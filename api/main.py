@@ -23,8 +23,11 @@ from config.config import get_data_source, get_data_sources, get_default_data_so
 
 from db.client import DatabaseClient
 import db.schema as db_models
+from llm.model_client import get_model_client
 from models import schemas
 from pipeline.orchestrator import PipelineOrchestrator
+from services.failed_case_service import FailedCaseScenarioService
+from synthesis.production_defect_detector import ProductionDefectDetector, reports_to_api_payload
 
 logger = logging.getLogger(__name__)
 
@@ -41,6 +44,7 @@ app.add_middleware(
 # Global clients
 db_client = DatabaseClient()
 orchestrator = PipelineOrchestrator()
+failed_case_service = FailedCaseScenarioService(db_client)
 
 GENERATION_PHASES = [
     {
@@ -1141,10 +1145,88 @@ def _find_run_defect_file(run_id: str | None) -> tuple[Path | None, str | None]:
     return None, None
 
 
+def _get_rule_override_map(source_name: str | None) -> dict[str, dict]:
+    if not source_name:
+        return {}
+    with db_client.session() as session:
+        configs = db_client.get_defect_rule_configs(session, source_name)
+        return {
+            config.rule_key: {
+                "action_mode": config.action_mode,
+                "review_status": config.review_status,
+                "custom_failure_reason": config.custom_failure_reason,
+                "custom_severity": config.custom_severity,
+                "human_notes": config.human_notes,
+                "llm_suggestion": config.llm_suggestion,
+            }
+            for config in configs
+            if config.review_status == "approved"
+        }
+
+
+def _build_live_defect_payload(source_name: str | None, table_name: str | None = None) -> dict:
+    config = load_config()
+    source = get_data_source(source_name, config)
+    resolved_source_name = source.get("name")
+    engine = _get_source_engine(resolved_source_name)
+
+    from ingestion.schema_connector import SchemaConnector
+    from ingestion.sqlglot_parser import DDLParser
+    from ingestion.querylog_miner import QueryLogMiner
+
+    connector = SchemaConnector(source["connection_string"])
+    tables = connector.extract_schema()
+    table_names = {table.table_name.upper() for table in tables}
+
+    ddl_dir = config.get("ingestion", {}).get("ddl_directory", "datasets/ddl")
+    query_dir = config.get("ingestion", {}).get("query_log_directory", "datasets/query_logs")
+    relationships = DDLParser(ddl_dir).parse_relationships() + QueryLogMiner(query_dir).mine_relationships()
+    relationships = [
+        rel for rel in relationships
+        if rel.source_table.upper() in table_names and rel.target_table.upper() in table_names
+    ]
+
+    rule_overrides = _get_rule_override_map(resolved_source_name)
+    detector = ProductionDefectDetector()
+    reports = detector.detect(
+        engine=engine,
+        relationships=relationships,
+        table_filter=[table_name] if table_name else None,
+        rule_overrides=rule_overrides,
+    )
+    return reports_to_api_payload(
+        reports,
+        run_id=None,
+        source_name=resolved_source_name,
+    )
+
+
+def _build_defect_rule_prompt(rule: dict, action_mode: str, human_notes: str) -> str:
+    return f"""
+You are reviewing a configurable production-defect rule for a synthetic telecom data system.
+
+Rule key: {rule['rule_key']}
+Source table: {rule['table_name']}
+Column: {rule['column_name']}
+Defect type: {rule['defect_type']}
+Default severity: {rule['default_severity']}
+Default failure reason: {rule['default_failure_reason']}
+
+Requested human action: {action_mode}
+Human notes: {human_notes or 'No extra notes provided.'}
+
+Decide whether this rule should still be flagged as a defect, allowed as valid business data, or customized.
+If customized, rewrite the failure reason and severity to match the human context.
+Also provide one concise note about how this should influence edge-case generation or review.
+"""
+
+
 @app.get("/api/edge-cases/production-defects")
 def get_production_defects(
     run_id: str | None = None,
     table_name: str | None = None,
+    source_name: str | None = None,
+    live: bool = False,
 ):
     """
     Return the production-defect report for a completed run.
@@ -1154,6 +1236,11 @@ def get_production_defects(
       - the production validation that would reject it
       - downstream/child rows affected via declared FKs
     """
+    if live or (source_name and not run_id):
+        payload = _build_live_defect_payload(source_name, table_name=table_name)
+        payload["run_id"] = run_id
+        return _json_safe(payload)
+
     defect_file, resolved_run_id = _find_run_defect_file(run_id)
     if defect_file is None:
         return {
@@ -1183,6 +1270,163 @@ def get_production_defects(
             t.get("defect_count", 0) for t in payload["tables"]
         )
     return payload
+
+
+@app.get("/api/edge-cases/rules")
+def get_defect_rule_catalog(source_name: str | None = None):
+    """Return the configurable production-defect rules merged with any saved overrides."""
+    config = load_config()
+    source = get_data_source(source_name, config)
+    resolved_source_name = source.get("name")
+    detector = ProductionDefectDetector()
+    catalog = detector.get_rule_catalog()
+    overrides = _get_rule_override_map(resolved_source_name)
+
+    merged = []
+    for rule in catalog:
+        override = overrides.get(rule["rule_key"], {})
+        merged.append(
+            {
+                **rule,
+                "source_name": resolved_source_name,
+                "action_mode": override.get("action_mode", "flag"),
+                "review_status": override.get("review_status", "pending"),
+                "llm_suggestion": override.get("llm_suggestion"),
+                "human_notes": override.get("human_notes"),
+                "custom_failure_reason": override.get("custom_failure_reason"),
+                "custom_severity": override.get("custom_severity"),
+            }
+        )
+
+    return {
+        "source_name": resolved_source_name,
+        "rules": merged,
+    }
+
+
+@app.post("/api/edge-cases/rules/{rule_key}/analyze")
+def analyze_defect_rule(rule_key: str, request: schemas.DefectRuleProposalRequest):
+    """Ask the LLM for a source-specific recommendation for a defect rule customization."""
+    detector = ProductionDefectDetector()
+    rule = next((item for item in detector.get_rule_catalog() if item["rule_key"] == rule_key.upper()), None)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Defect rule not found")
+
+    try:
+        model_client = get_model_client()
+        suggestion = model_client.invoke(
+            prompt=_build_defect_rule_prompt(rule, request.action_mode, request.human_notes),
+            output_schema=schemas.DefectRuleSuggestionSchema,
+            retry_on_failure=True,
+        )
+    except Exception as exc:
+        logger.warning("Defect rule LLM analysis failed for %s: %s", rule_key, exc)
+        suggestion = schemas.DefectRuleSuggestionSchema(
+            rule_key=rule_key.upper(),
+            recommended_action=request.action_mode,
+            rationale="LLM recommendation unavailable. Human notes were saved and manual approval can still be applied.",
+            adjusted_failure_reason=request.human_notes or rule["default_failure_reason"],
+            adjusted_severity=rule["default_severity"],
+            edge_case_guidance="Apply human-reviewed guidance for this source until the LLM is available again.",
+            confidence=0.0,
+        )
+
+    return {"source_name": request.source_name, "rule_key": rule_key.upper(), "suggestion": suggestion.model_dump()}
+
+
+@app.post("/api/edge-cases/rules/{rule_key}/approve")
+def approve_defect_rule(rule_key: str, request: schemas.DefectRuleApprovalRequest):
+    """Approve and apply a production-defect rule override for a source."""
+    detector = ProductionDefectDetector()
+    rule = next((item for item in detector.get_rule_catalog() if item["rule_key"] == rule_key.upper()), None)
+    if not rule:
+        raise HTTPException(status_code=404, detail="Defect rule not found")
+
+    with db_client.session() as session:
+        existing = {
+            config.rule_key: config
+            for config in db_client.get_defect_rule_configs(session, request.source_name)
+        }.get(rule_key.upper())
+
+        suggestion = existing.llm_suggestion if existing else None
+        db_client.upsert_defect_rule_config(
+            session,
+            {
+                "source_name": request.source_name,
+                "rule_key": rule_key.upper(),
+                "table_name": rule["table_name"],
+                "column_name": rule["column_name"],
+                "defect_type": rule["defect_type"],
+                "default_failure_reason": rule["default_failure_reason"],
+                "default_severity": rule["default_severity"],
+                "action_mode": request.action_mode,
+                "review_status": "approved",
+                "llm_suggestion": suggestion,
+                "human_notes": request.human_notes,
+                "custom_failure_reason": request.custom_failure_reason,
+                "custom_severity": request.custom_severity,
+            },
+        )
+
+    return {
+        "message": "Defect rule override approved",
+        "rule_key": rule_key.upper(),
+        "source_name": request.source_name,
+        "action_mode": request.action_mode,
+    }
+
+
+@app.post("/api/edge-cases/rules/{rule_key}/reset")
+def reset_defect_rule(rule_key: str, source_name: str):
+    """Remove a saved production-defect rule override."""
+    with db_client.session() as session:
+        db_client.delete_defect_rule_config(session, source_name, rule_key.upper())
+    return {"message": "Defect rule override reset", "rule_key": rule_key.upper(), "source_name": source_name}
+
+
+@app.get("/api/failed-cases/tables")
+def get_failed_case_tables(source_name: str | None = None):
+    """Return source tables that can be used as the root of a failed-case scenario."""
+    return failed_case_service.list_traceable_tables(source_name or get_default_data_source(load_config()).get("name"))
+
+
+@app.get("/api/failed-cases/values")
+def get_failed_case_values(
+    source_name: str,
+    table_name: str,
+    id_column: str,
+    search: str | None = None,
+):
+    """Return candidate ID values for the failed-case root selector."""
+    return failed_case_service.list_id_values(source_name, table_name, id_column, search=search)
+
+
+@app.get("/api/failed-cases/trace")
+def trace_failed_case(
+    source_name: str,
+    table_name: str,
+    id_column: str,
+    id_value: str,
+):
+    """Trace a failed-case root ID across upstream and downstream related rows."""
+    try:
+        return failed_case_service.trace_case(source_name, table_name, id_column, id_value)
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
+
+
+@app.post("/api/failed-cases/generate")
+def generate_failed_case(request: schemas.FailedCaseRequest):
+    """Generate a synthetic replica bundle for a selected failed-case ID."""
+    try:
+        return failed_case_service.generate_synthetic_case(
+            request.source_name,
+            request.table_name,
+            request.id_column,
+            request.id_value,
+        )
+    except ValueError as exc:
+        raise HTTPException(status_code=404, detail=str(exc))
 
 
 # =====================================================

@@ -2,14 +2,21 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import axios from 'axios';
 import {
   AlertTriangle,
+  Brain,
+  CheckCircle2,
   ChevronRight,
   Link2,
   RefreshCw,
+  RotateCcw,
   ShieldAlert,
   X,
 } from 'lucide-react';
 
-const API_BASE = 'http://localhost:8001/api';
+const API_HOST =
+  typeof window !== 'undefined' && window.location?.hostname
+    ? window.location.hostname
+    : '127.0.0.1';
+const API_BASE = `http://${API_HOST}:8001/api`;
 
 const SEVERITY_STYLES = {
   critical: 'bg-rose-100 text-rose-700 border-rose-200',
@@ -24,6 +31,13 @@ const formatValue = (value) => {
   return s.length > 120 ? `${s.slice(0, 117)}…` : s;
 };
 
+const buildRuleDraft = (rule) => ({
+  action_mode: rule.action_mode || 'flag',
+  human_notes: rule.human_notes || '',
+  custom_failure_reason: rule.custom_failure_reason || '',
+  custom_severity: rule.custom_severity || rule.default_severity || 'medium',
+});
+
 const EdgeCasePanel = ({
   runId = null,
   sourceName = null,
@@ -37,17 +51,33 @@ const EdgeCasePanel = ({
   const [error, setError] = useState(null);
   const [focusTable, setFocusTable] = useState(selectedTable);
   const [expandedDefectId, setExpandedDefectId] = useState(null);
+  const [rules, setRules] = useState([]);
+  const [rulesLoading, setRulesLoading] = useState(false);
+  const [ruleDrafts, setRuleDrafts] = useState({});
+  const [ruleInsights, setRuleInsights] = useState({});
+  const [ruleFeedback, setRuleFeedback] = useState({});
+  const [ruleActionLoading, setRuleActionLoading] = useState({});
 
   useEffect(() => {
     setFocusTable(selectedTable);
   }, [selectedTable]);
+
+  useEffect(() => {
+    setRuleInsights({});
+    setRuleFeedback({});
+    setRuleActionLoading({});
+  }, [sourceName]);
 
   const fetchReport = useCallback(async () => {
     setLoading(true);
     setError(null);
     try {
       const res = await axios.get(`${API_BASE}/edge-cases/production-defects`, {
-        params: { run_id: runId || undefined },
+        params: {
+          run_id: runId || undefined,
+          source_name: sourceName || undefined,
+          live: sourceName ? true : undefined,
+        },
       });
       setReport(res.data || null);
     } catch (err) {
@@ -57,11 +87,37 @@ const EdgeCasePanel = ({
     } finally {
       setLoading(false);
     }
-  }, [runId]);
+  }, [runId, sourceName]);
+
+  const fetchRules = useCallback(async () => {
+    if (!sourceName) return;
+    setRulesLoading(true);
+    try {
+      const res = await axios.get(`${API_BASE}/edge-cases/rules`, {
+        params: { source_name: sourceName },
+      });
+      const items = res.data?.rules || [];
+      setRules(items);
+      setRuleDrafts(
+        items.reduce((next, rule) => {
+          next[rule.rule_key] = buildRuleDraft(rule);
+          return next;
+        }, {})
+      );
+    } catch (err) {
+      console.error('Failed to load defect rule catalog', err);
+    } finally {
+      setRulesLoading(false);
+    }
+  }, [sourceName]);
 
   useEffect(() => {
     fetchReport();
   }, [fetchReport]);
+
+  useEffect(() => {
+    fetchRules();
+  }, [fetchRules]);
 
   const tables = useMemo(() => report?.tables || [], [report]);
 
@@ -75,6 +131,137 @@ const EdgeCasePanel = ({
     }
     return tables[0];
   }, [tables, focusTable]);
+
+  const updateDraft = (ruleKey, patch) => {
+    setRuleDrafts((current) => ({
+      ...current,
+      [ruleKey]: {
+        ...(current[ruleKey] || {}),
+        ...patch,
+      },
+    }));
+  };
+
+  const analyzeRule = async (ruleKey) => {
+    const draft = ruleDrafts[ruleKey] || {};
+    try {
+      setRuleActionLoading((current) => ({ ...current, [ruleKey]: 'analyze' }));
+      const res = await axios.post(`${API_BASE}/edge-cases/rules/${ruleKey}/analyze`, {
+        source_name: sourceName,
+        action_mode: draft.action_mode === 'customize' ? 'customize' : 'flag',
+        human_notes: draft.human_notes || '',
+      });
+      const suggestion = res.data?.suggestion || null;
+      setRuleInsights((current) => ({
+        ...current,
+        [ruleKey]: suggestion,
+      }));
+      if (suggestion) {
+        setRuleDrafts((current) => ({
+          ...current,
+          [ruleKey]: {
+            ...(current[ruleKey] || {}),
+            custom_failure_reason:
+              current[ruleKey]?.custom_failure_reason || suggestion.adjusted_failure_reason || '',
+            custom_severity:
+              current[ruleKey]?.custom_severity || suggestion.adjusted_severity || 'medium',
+          },
+        }));
+      }
+      setRuleFeedback((current) => ({
+        ...current,
+        [ruleKey]: { type: 'info', message: 'LLM insight loaded. Review it before deciding.' },
+      }));
+    } catch (err) {
+      console.error('Failed to analyze defect rule', err);
+      setRuleFeedback((current) => ({
+        ...current,
+        [ruleKey]: {
+          type: 'error',
+          message: err?.response?.data?.detail || err.message || 'Failed to get LLM insight.',
+        },
+      }));
+    } finally {
+      setRuleActionLoading((current) => ({ ...current, [ruleKey]: null }));
+    }
+  };
+
+  const applyRuleDecision = async (ruleKey, actionMode) => {
+    const draft = ruleDrafts[ruleKey] || {};
+    try {
+      setRuleActionLoading((current) => ({ ...current, [ruleKey]: actionMode }));
+      await axios.post(`${API_BASE}/edge-cases/rules/${ruleKey}/approve`, {
+        source_name: sourceName,
+        action_mode: actionMode,
+        human_notes: draft.human_notes || '',
+        custom_failure_reason:
+          actionMode === 'customize' ? draft.custom_failure_reason || null : null,
+        custom_severity:
+          actionMode === 'customize' ? draft.custom_severity || null : null,
+      });
+      setRuleInsights((current) => {
+        const next = { ...current };
+        delete next[ruleKey];
+        return next;
+      });
+      await Promise.all([fetchRules(), fetchReport()]);
+      const message =
+        actionMode === 'allow'
+          ? 'Rejected as a defect for this source.'
+          : actionMode === 'customize'
+          ? 'Customization saved.'
+          : 'Approved as a defect for this source.';
+      setRuleFeedback((current) => ({
+        ...current,
+        [ruleKey]: { type: 'success', message },
+      }));
+    } catch (err) {
+      console.error('Failed to approve defect rule', err);
+      setRuleFeedback((current) => ({
+        ...current,
+        [ruleKey]: {
+          type: 'error',
+          message: err?.response?.data?.detail || err.message || 'Failed to save rule decision.',
+        },
+      }));
+    } finally {
+      setRuleActionLoading((current) => ({ ...current, [ruleKey]: null }));
+    }
+  };
+
+  const getReviewStatusLabel = (rule) => {
+    if (ruleInsights[rule.rule_key]) return 'llm reviewed';
+    if (rule.review_status === 'approved' && rule.action_mode === 'allow') return 'rejected';
+    if (rule.review_status === 'approved' && rule.action_mode === 'customize') return 'customized';
+    if (rule.review_status === 'approved') return 'approved';
+    return 'default';
+  };
+
+  const openCustomization = (rule) => {
+    setRuleDrafts((current) => ({
+      ...current,
+      [rule.rule_key]: {
+        ...buildRuleDraft(rule),
+        ...(current[rule.rule_key] || {}),
+        action_mode: 'customize',
+        custom_failure_reason:
+          current[rule.rule_key]?.custom_failure_reason ||
+          rule.custom_failure_reason ||
+          rule.default_failure_reason,
+        custom_severity:
+          current[rule.rule_key]?.custom_severity ||
+          rule.custom_severity ||
+          rule.default_severity,
+      },
+    }));
+  };
+
+  const cancelCustomization = (rule) => {
+    setRuleDrafts((current) => ({
+      ...current,
+      [rule.rule_key]: buildRuleDraft(rule),
+    }));
+  };
 
   const handleSelectTable = (tableName) => {
     setFocusTable(tableName);
@@ -138,6 +325,188 @@ const EdgeCasePanel = ({
             Source: {sourceName}
           </span>
         )}
+      </div>
+
+      <div className="border-b border-slate-200 bg-slate-50/50 px-6 py-5">
+        <div className="flex flex-wrap items-start justify-between gap-4">
+          <div>
+            <h3 className="text-sm font-semibold text-slate-900">Configurable defect rules</h3>
+            <p className="mt-1 max-w-3xl text-xs text-slate-500">
+              Customize what should count as a production defect for this source. Ask the LLM for a recommendation,
+              then approve the override yourself before it affects the live defect scan.
+            </p>
+          </div>
+          <button
+            onClick={fetchRules}
+            className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs text-slate-600 hover:border-slate-300"
+          >
+            <RefreshCw size={12} className={rulesLoading ? 'animate-spin' : ''} />
+            Refresh rules
+          </button>
+        </div>
+
+        <div className="mt-4 grid gap-3 xl:grid-cols-2">
+          {rules.map((rule) => {
+            const draft = ruleDrafts[rule.rule_key] || {};
+            const isCustomizing = (draft.action_mode || 'flag') === 'customize';
+            const reviewStatusLabel = getReviewStatusLabel(rule);
+            const llmSuggestion = ruleInsights[rule.rule_key];
+            const feedback = ruleFeedback[rule.rule_key];
+            const actionLoading = ruleActionLoading[rule.rule_key];
+            return (
+              <div key={rule.rule_key} className="rounded-2xl border border-slate-200 bg-white p-4">
+                <div className="flex flex-wrap items-center gap-2">
+                  <span className="font-mono text-xs text-slate-900">{rule.table_name}.{rule.column_name}</span>
+                  <span className="rounded-full bg-slate-100 px-2 py-0.5 text-[10px] font-semibold text-slate-600">
+                    {rule.defect_type}
+                  </span>
+                  <span className={`rounded-full px-2 py-0.5 text-[10px] font-semibold ${
+                    reviewStatusLabel === 'approved'
+                      ? 'bg-emerald-100 text-emerald-700'
+                      : reviewStatusLabel === 'rejected'
+                      ? 'bg-amber-100 text-amber-700'
+                      : reviewStatusLabel === 'customized'
+                      ? 'bg-sky-100 text-sky-700'
+                      : reviewStatusLabel === 'llm reviewed'
+                      ? 'bg-fuchsia-100 text-fuchsia-700'
+                      : 'bg-slate-100 text-slate-600'
+                  }`}>
+                    {reviewStatusLabel}
+                  </span>
+                </div>
+                <p className="mt-2 text-xs text-slate-500">{rule.default_failure_reason}</p>
+                <div className="mt-3 rounded-2xl border border-slate-200 bg-slate-50 px-3 py-2 text-xs text-slate-600">
+                  Approve keeps this as a production defect. Reject treats it as valid for this source.
+                  Customize lets you change the severity or failure reason before saving.
+                </div>
+                <div className="mt-3">
+                  <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Human notes</label>
+                  <textarea
+                    rows={2}
+                    value={draft.human_notes || ''}
+                    onChange={(e) => updateDraft(rule.rule_key, { human_notes: e.target.value })}
+                    placeholder="Example: negative balance is valid for postpaid corporate customers"
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                  />
+                </div>
+                {isCustomizing && (
+                  <div className="mt-3 grid gap-3 md:grid-cols-2">
+                    <div>
+                      <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Severity</label>
+                      <select
+                        value={draft.custom_severity || rule.default_severity}
+                        onChange={(e) => updateDraft(rule.rule_key, { custom_severity: e.target.value })}
+                        className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                      >
+                        <option value="critical">critical</option>
+                        <option value="high">high</option>
+                        <option value="medium">medium</option>
+                      </select>
+                    </div>
+                  </div>
+                )}
+                {isCustomizing && (
+                <div className="mt-3">
+                  <label className="text-[10px] font-semibold uppercase tracking-wide text-slate-500">Applied failure reason</label>
+                  <textarea
+                    rows={2}
+                    value={draft.custom_failure_reason || rule.custom_failure_reason || ''}
+                    onChange={(e) => updateDraft(rule.rule_key, { custom_failure_reason: e.target.value })}
+                    placeholder="Optional custom wording for why this should or should not be treated as a defect"
+                    className="mt-1 w-full rounded-xl border border-slate-200 bg-white px-3 py-2 text-xs text-slate-700"
+                  />
+                </div>
+                )}
+
+                {llmSuggestion && (
+                  <div className="mt-3 rounded-xl border border-fuchsia-200 bg-fuchsia-50 p-3">
+                    <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wide text-fuchsia-700">
+                      <Brain size={12} />
+                      LLM recommendation
+                    </div>
+                    <p className="mt-2 text-xs text-fuchsia-900">{llmSuggestion.rationale}</p>
+                    {llmSuggestion.adjusted_failure_reason && (
+                      <p className="mt-2 text-[11px] text-fuchsia-700">
+                        Suggested reason: {llmSuggestion.adjusted_failure_reason}
+                      </p>
+                    )}
+                    {llmSuggestion.edge_case_guidance && (
+                      <p className="mt-1 text-[11px] text-fuchsia-700">
+                        Edge-case guidance: {llmSuggestion.edge_case_guidance}
+                      </p>
+                    )}
+                  </div>
+                )}
+
+                {feedback && (
+                  <div
+                    className={`mt-3 rounded-xl border px-3 py-2 text-xs ${
+                      feedback.type === 'error'
+                        ? 'border-rose-200 bg-rose-50 text-rose-700'
+                        : feedback.type === 'success'
+                        ? 'border-emerald-200 bg-emerald-50 text-emerald-700'
+                        : 'border-sky-200 bg-sky-50 text-sky-700'
+                    }`}
+                  >
+                    {feedback.message}
+                  </div>
+                )}
+
+                <div className="mt-4 flex flex-wrap items-center gap-2">
+                  <button
+                    onClick={() => analyzeRule(rule.rule_key)}
+                    disabled={Boolean(actionLoading)}
+                    className="inline-flex items-center gap-2 rounded-full border border-fuchsia-200 bg-fuchsia-50 px-3 py-2 text-xs font-semibold text-fuchsia-700 hover:bg-fuchsia-100"
+                  >
+                    <Brain size={12} />
+                    {actionLoading === 'analyze' ? 'Checking...' : 'Ask LLM'}
+                  </button>
+                  <button
+                    onClick={() => applyRuleDecision(rule.rule_key, 'flag')}
+                    disabled={Boolean(actionLoading)}
+                    className="inline-flex items-center gap-2 rounded-full bg-slate-900 px-3 py-2 text-xs font-semibold text-white hover:bg-slate-800"
+                  >
+                    <CheckCircle2 size={12} />
+                    {actionLoading === 'flag' ? 'Approving...' : 'Approve'}
+                  </button>
+                  <button
+                    onClick={() => applyRuleDecision(rule.rule_key, 'allow')}
+                    disabled={Boolean(actionLoading)}
+                    className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                  >
+                    <RotateCcw size={12} />
+                    {actionLoading === 'allow' ? 'Rejecting...' : 'Reject'}
+                  </button>
+                  {isCustomizing ? (
+                    <>
+                      <button
+                        onClick={() => applyRuleDecision(rule.rule_key, 'customize')}
+                        disabled={Boolean(actionLoading)}
+                        className="inline-flex items-center gap-2 rounded-full border border-slate-900 bg-white px-3 py-2 text-xs font-semibold text-slate-900 hover:bg-slate-50"
+                      >
+                        {actionLoading === 'customize' ? 'Saving...' : 'Save customization'}
+                      </button>
+                      <button
+                        onClick={() => cancelCustomization(rule)}
+                        disabled={Boolean(actionLoading)}
+                        className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-500 hover:bg-slate-50"
+                      >
+                        Cancel
+                      </button>
+                    </>
+                  ) : (
+                    <button
+                      onClick={() => openCustomization(rule)}
+                      className="inline-flex items-center gap-2 rounded-full border border-slate-200 bg-white px-3 py-2 text-xs font-semibold text-slate-600 hover:bg-slate-50"
+                    >
+                      Customize
+                    </button>
+                  )}
+                </div>
+              </div>
+            );
+          })}
+        </div>
       </div>
 
       <div className="flex flex-1 overflow-hidden">

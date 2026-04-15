@@ -124,6 +124,10 @@ class Validator:
     # Customer tables are missing).
     requires_tables: tuple[str, ...] = ()
 
+    @property
+    def rule_key(self) -> str:
+        return f"{self.table}.{self.column}.{self.defect_type}".upper()
+
 
 # The validators below mirror the real bad-data patterns that
 # ``datasets/inject_production_defects.py`` plants, but they are expressed
@@ -303,6 +307,7 @@ class ProductionDefectDetector:
         engine: Engine,
         relationships: Iterable[Any] = (),
         table_filter: Iterable[str] | None = None,
+        rule_overrides: dict[str, dict] | None = None,
     ) -> dict[str, TableDefectReport]:
         """
         Execute every validator whose target table exists in the source
@@ -334,6 +339,9 @@ class ProductionDefectDetector:
             )
 
         reports: dict[str, TableDefectReport] = {}
+        rule_overrides = {
+            (key or "").upper(): value for key, value in (rule_overrides or {}).items()
+        }
 
         for validator in VALIDATORS:
             target = validator.table.upper()
@@ -344,6 +352,11 @@ class ProductionDefectDetector:
             # Skip validators that reference tables that don't exist (e.g.
             # dangling-FK checks against missing parent table).
             if any(t.upper() not in existing_tables for t in validator.requires_tables):
+                continue
+            override = rule_overrides.get(validator.rule_key, {})
+            override_mode = (override.get("action_mode") or "flag").lower()
+            override_status = (override.get("review_status") or "").lower()
+            if override_mode == "allow" and override_status == "approved":
                 continue
 
             report = reports.setdefault(
@@ -375,8 +388,16 @@ class ProductionDefectDetector:
                     column=validator.column,
                     defect_type=validator.defect_type,
                     original_value=bad_value,
-                    prod_failure_reason=validator.reason,
-                    severity=validator.severity,
+                    prod_failure_reason=(
+                        override.get("custom_failure_reason")
+                        if override_mode == "customize" and override_status == "approved" and override.get("custom_failure_reason")
+                        else validator.reason
+                    ),
+                    severity=(
+                        override.get("custom_severity")
+                        if override_mode == "customize" and override_status == "approved" and override.get("custom_severity")
+                        else validator.severity
+                    ),
                     example_row=row_dict,
                 )
 
@@ -391,6 +412,23 @@ class ProductionDefectDetector:
                 report.defect_rows.append(defect)
 
         return reports
+
+    def get_rule_catalog(self) -> list[dict]:
+        """Return the static validator catalog for UI customization."""
+        catalog = []
+        for validator in VALIDATORS:
+            catalog.append(
+                {
+                    "rule_key": validator.rule_key,
+                    "table_name": validator.table,
+                    "column_name": validator.column,
+                    "defect_type": validator.defect_type,
+                    "default_failure_reason": validator.reason,
+                    "default_severity": validator.severity,
+                    "requires_tables": list(validator.requires_tables),
+                }
+            )
+        return catalog
 
     # ------------------------------------------------------------------ #
     def _list_existing_tables(self, engine: Engine) -> set[str]:

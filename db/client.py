@@ -89,6 +89,7 @@ class DatabaseClient:
         self.ensure_schema_compatibility()
         self.backfill_legacy_source_names()
         self.prune_invalid_cached_policies()
+        self.prune_non_override_defect_configs()
         self.mark_incomplete_runs_failed()
 
     def ensure_schema_compatibility(self):
@@ -234,6 +235,17 @@ class DatabaseClient:
                 valid_columns = source_tables.get(policy.table_name)
                 if not valid_columns or policy.column_name not in valid_columns:
                     session.delete(policy)
+
+    def prune_non_override_defect_configs(self):
+        """Drop stale human-review rows that should not persist as overrides."""
+        from db.schema import DefectRuleConfig
+
+        with self.session() as session:
+            stale_configs = session.query(DefectRuleConfig).filter(
+                DefectRuleConfig.review_status != "approved"
+            ).all()
+            for config in stale_configs:
+                session.delete(config)
 
     @contextmanager
     def session(self):
@@ -450,3 +462,57 @@ class DatabaseClient:
         if model_type:
             query = query.filter_by(model_type=model_type)
         return query.order_by(ModelRegistry.is_active.desc(), ModelRegistry.trained_at.desc()).limit(limit).all()
+
+    # === Defect Rule Config Operations ===
+    def upsert_defect_rule_config(self, session: Session, config_data: dict):
+        """Insert or update a source-specific production-defect rule config."""
+        from db.schema import DefectRuleConfig
+
+        existing = session.query(DefectRuleConfig).filter_by(
+            source_name=config_data["source_name"],
+            rule_key=config_data["rule_key"],
+        ).first()
+
+        if existing:
+            for key, value in config_data.items():
+                setattr(existing, key, value)
+            return existing
+
+        record = DefectRuleConfig(**config_data)
+        session.add(record)
+        return record
+
+    def get_defect_rule_configs(self, session: Session, source_name: str):
+        """Return all production-defect rule configs for a source."""
+        from db.schema import DefectRuleConfig
+
+        return session.query(DefectRuleConfig).filter_by(source_name=source_name).all()
+
+    def delete_defect_rule_config(self, session: Session, source_name: str, rule_key: str):
+        """Delete a production-defect rule config override."""
+        from db.schema import DefectRuleConfig
+
+        record = session.query(DefectRuleConfig).filter_by(
+            source_name=source_name,
+            rule_key=rule_key,
+        ).first()
+        if record:
+            session.delete(record)
+        return record
+
+    # === Failed Case Scenario Operations ===
+    def upsert_failed_case_scenario(self, session: Session, scenario_data: dict):
+        """Insert or update a stored failed-case scenario payload."""
+        from db.schema import FailedCaseScenario
+
+        existing = session.query(FailedCaseScenario).filter_by(
+            scenario_id=scenario_data["scenario_id"]
+        ).first()
+        if existing:
+            for key, value in scenario_data.items():
+                setattr(existing, key, value)
+            return existing
+
+        record = FailedCaseScenario(**scenario_data)
+        session.add(record)
+        return record

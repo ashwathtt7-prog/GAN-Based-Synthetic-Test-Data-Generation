@@ -1,0 +1,650 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>GAN Synthetic Data — Solution Architecture</title>
+<style>
+  *, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+
+  body {
+    font-family: 'Segoe UI', system-ui, -apple-system, sans-serif;
+    background: #0f1117;
+    color: #e2e8f0;
+    min-height: 100vh;
+    overflow-x: hidden;
+  }
+
+  .header {
+    background: linear-gradient(135deg, #1a1a2e 0%, #16213e 50%, #0f3460 100%);
+    border-bottom: 1px solid #2d3748;
+    padding: 28px 40px 24px;
+    position: sticky;
+    top: 0;
+    z-index: 100;
+  }
+  .header h1 {
+    font-size: 24px;
+    font-weight: 700;
+    letter-spacing: -0.5px;
+    background: linear-gradient(135deg, #60a5fa, #a78bfa, #f472b6);
+    -webkit-background-clip: text;
+    -webkit-text-fill-color: transparent;
+    background-clip: text;
+  }
+  .header p { margin-top: 6px; font-size: 14px; color: #94a3b8; max-width: 800px; }
+
+  .controls {
+    display: flex; gap: 10px; align-items: center; margin-top: 16px; flex-wrap: wrap;
+  }
+  .controls button {
+    padding: 7px 16px; border: 1px solid #4a5568; border-radius: 6px;
+    background: #1e293b; color: #cbd5e1; font-size: 13px; cursor: pointer;
+    transition: all 0.15s; display: flex; align-items: center; gap: 6px;
+  }
+  .controls button:hover { background: #334155; border-color: #60a5fa; color: #fff; }
+  .controls button.active { background: #2563eb; border-color: #3b82f6; color: #fff; }
+  .zoom-label { font-size: 12px; color: #64748b; margin-left: 8px; }
+  .sep { width: 1px; height: 20px; background: #334155; margin: 0 6px; }
+  .hint { font-size: 12px; color: #64748b; }
+
+  .legend { display: flex; flex-wrap: wrap; gap: 8px; margin-top: 14px; }
+  .legend-item {
+    display: flex; align-items: center; gap: 6px; font-size: 12px; color: #94a3b8;
+    padding: 4px 10px; border-radius: 4px;
+    background: rgba(255,255,255,0.03); border: 1px solid rgba(255,255,255,0.06);
+  }
+  .legend-dot { width: 12px; height: 12px; border-radius: 3px; flex-shrink: 0; }
+
+  .diagram-wrap {
+    padding: 30px 20px;
+    overflow: hidden;
+    display: flex;
+    justify-content: flex-start;
+    min-height: calc(100vh - 220px);
+    position: relative;
+    cursor: grab;
+    user-select: none;
+    touch-action: none;
+  }
+  .diagram-wrap.dragging { cursor: grabbing; }
+  #diagram-target { transform-origin: top left; transition: transform 0.18s ease; will-change: transform; }
+  .diagram-wrap.dragging #diagram-target { transition: none; }
+
+  .callout-panel {
+    position: fixed; bottom: 20px; right: 20px;
+    background: #1e293b; border: 1px solid #334155; border-radius: 10px;
+    padding: 16px 20px; max-width: 380px;
+    box-shadow: 0 8px 32px rgba(0,0,0,0.5); z-index: 200;
+    display: none; animation: slideIn 0.2s ease;
+  }
+  .callout-panel.visible { display: block; }
+  .callout-panel h3 { font-size: 14px; font-weight: 600; margin-bottom: 8px; }
+  .callout-panel p { font-size: 13px; color: #94a3b8; line-height: 1.5; }
+  .callout-panel .badge {
+    display: inline-block; padding: 2px 8px; border-radius: 4px;
+    font-size: 11px; font-weight: 600; margin-bottom: 8px;
+  }
+  @keyframes slideIn {
+    from { transform: translateY(10px); opacity: 0; }
+    to   { transform: translateY(0); opacity: 1; }
+  }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>GAN-Based Synthetic Data Generation &mdash; Solution Architecture</h1>
+  <p>Rule-based pipeline with LLM-driven semantic reasoning. The 3 pink nodes are the only LLM touchpoints &mdash; everything else is deterministic.</p>
+  <div class="controls">
+    <button onclick="zoomTo(0.4)">40%</button>
+    <button onclick="zoomTo(0.6)">60%</button>
+    <button onclick="zoomTo(0.8)">80%</button>
+    <button class="active" onclick="zoomTo(1)">100%</button>
+    <button onclick="zoomTo(1.3)">130%</button>
+    <button onclick="zoomTo(1.6)">160%</button>
+    <button onclick="resetView()">Reset View</button>
+    <span class="zoom-label" id="zoomLabel">Zoom: 100%</span>
+    <span class="sep"></span>
+    <button onclick="showPhase('all')">Show All</button>
+    <button onclick="showPhase('ingestion')">Ingestion</button>
+    <button onclick="showPhase('kg')">Knowledge Graph</button>
+    <button onclick="showPhase('intelligence')">Intelligence</button>
+    <button onclick="showPhase('synthesis')">Synthesis</button>
+    <button onclick="showPhase('validation')">Validation</button>
+    <button onclick="showPhase('delivery')">Delivery</button>
+    <button onclick="showPhase('edgecustom')">Edge Case Customization</button>
+    <button onclick="showPhase('failedcase')">Failed Case Replication</button>
+    <button onclick="showPhase('llm')">LLM Only</button>
+    <span class="hint">Drag to pan. Use mouse wheel to zoom.</span>
+  </div>
+  <div class="legend">
+    <div class="legend-item"><div class="legend-dot" style="background:#e8f4fd;border:1px solid #2196f3"></div>Data Sources</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fff3e0;border:1px solid #ff9800"></div>Ingestion / Processing</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e8eaf6;border:1px solid #3f51b5"></div>Knowledge Graph</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fce4ec;border:1px solid #e91e63"></div>LLM Calls — Gemini / Ollama</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#fff8e1;border:1px solid #ffc107"></div>Human Review</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e0f2f1;border:1px solid #009688"></div>Rule-Based Generation</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#f3e5f5;border:1px solid #9c27b0"></div>Validation</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e8f5e9;border:1px solid #4caf50"></div>Output / Delivery</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#efebe9;border:1px solid #795548"></div>Operational DB</div>
+    <div class="legend-item"><div class="legend-dot" style="background:#e3f2fd;border:1px solid #1565c0"></div>Failed Case Replication</div>
+  </div>
+</div>
+
+<div class="diagram-wrap">
+  <div id="diagram-target"></div>
+</div>
+
+<div class="callout-panel" id="callout">
+  <div class="badge" id="calloutBadge"></div>
+  <h3 id="calloutTitle"></h3>
+  <p id="calloutText"></p>
+</div>
+
+<script src="https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js"></script>
+<script>
+// Diagram as a JS string — avoids HTML entity issues.
+// RESERVED WORD FIX: "graph" renamed to "kg" everywhere.
+// ARROW FIX: no "-->" inside node labels (confuses parser).
+// DASH FIX: no bare "--" in labels (confuses parser).
+const DIAGRAM = [
+'flowchart TB',
+'',
+'  classDef source fill:#e8f4fd,stroke:#2196f3,stroke-width:2px,color:#0d47a1',
+'  classDef phase  fill:#fff3e0,stroke:#ff9800,stroke-width:2px,color:#e65100',
+'  classDef llm    fill:#fce4ec,stroke:#e91e63,stroke-width:2px,color:#880e4f',
+'  classDef kg     fill:#e8eaf6,stroke:#3f51b5,stroke-width:2px,color:#1a237e',
+'  classDef rule   fill:#e0f2f1,stroke:#009688,stroke-width:2px,color:#004d40',
+'  classDef vld    fill:#f3e5f5,stroke:#9c27b0,stroke-width:2px,color:#4a148c',
+'  classDef out    fill:#e8f5e9,stroke:#4caf50,stroke-width:2px,color:#1b5e20',
+'  classDef human  fill:#fff8e1,stroke:#ffc107,stroke-width:2px,color:#f57f17',
+'  classDef db     fill:#efebe9,stroke:#795548,stroke-width:2px,color:#3e2723',
+'  classDef fc     fill:#e3f2fd,stroke:#1565c0,stroke-width:2px,color:#0d47a1',
+'',
+'  subgraph SOURCES["DATA SOURCES : Backend-Agnostic Input"]',
+'    direction LR',
+'    S1["SQLite OLTP\ntelecom_source.db\n22 tables, ~200k rows"]:::source',
+'    S2["DuckDB Warehouse\ntelecom_dw.duckdb\nColumnar OLAP"]:::source',
+'    S3["DuckDB Parquet Lake\ntelecom_lake.duckdb\nViews over .parquet files"]:::source',
+'  end',
+'',
+'  subgraph P1["PHASE 1 : Schema Ingestion"]',
+'    direction TB',
+'    P1A["SchemaConnector\nSQLAlchemy reflection for SQLite\ninfo_schema introspection for DuckDB"]:::phase',
+'    P1B["DDL Parser\nsqlglot extracts explicit FK\nconstraints from DDL files"]:::phase',
+'    P1C["Query Log Miner\nMines implicit JOIN patterns\nfrom historical SQL logs"]:::phase',
+'    P1D["Merge Relationships\nExplicit FKs + Implicit JOINs\ninto unified relationship list"]:::phase',
+'  end',
+'',
+'  SOURCES --> P1A',
+'  P1A --> P1D',
+'  P1B --> P1D',
+'  P1C --> P1D',
+'',
+'  subgraph P2["PHASE 2 : Knowledge Graph Construction"]',
+'    direction TB',
+'    P2A["Build In-Memory Graph\nNetworkX\nTables = Nodes, FKs = Edges"]:::kg',
+'    P2B["Abbreviation Dictionary\nCUST=Customer, BLNG=Billing\nNTWK=Network, PYMT=Payment"]:::kg',
+'  end',
+'',
+'  P1D --> P2A',
+'  P2B --> P2A',
+'',
+'  subgraph P3["PHASE 3 : Domain Partitioning"]',
+'    direction TB',
+'    P3A{"Louvain Community\nDetection\non knowledge graph"}:::kg',
+'    P3B["Heuristic Fallback\nkeyword to domain mapping\nif Louvain fails"]:::phase',
+'    P3C["Domain Map\ncustomer_management\nbilling_revenue\nnetwork_operations"]:::kg',
+'  end',
+'',
+'  P2A --> P3A',
+'  P3A -->|"success"| P3C',
+'  P3A -->|"fail"| P3B',
+'  P3B --> P3C',
+'',
+'  subgraph P4["PHASE 4 : Intelligence and Semantic Reasoning"]',
+'    direction TB',
+'',
+'    subgraph PII_SUB["Step 4.1 : PII Detection"]',
+'      P4A["Presidio Scanner\nspaCy NER + custom recognizers\nSSN, IMSI, Subscriber ID"]:::phase',
+'    end',
+'',
+'    subgraph ABBR_SUB["Step 4.2 : Abbreviation Resolution"]',
+'      P4B["Knowledge Graph Lookup\nExpand column name tokens\nvia abbreviation dictionary"]:::kg',
+'    end',
+'',
+'    subgraph LLM_SUB["Step 4.3 : LLM Column Classification, parallelized"]',
+'      P4C["Gather Graph Context\n: Sibling columns\n: FK relationships\n: Downstream tables\n: Abbreviation expansions\n: Business domain"]:::kg',
+'      P4D["LLM CALL 1\nGemini or Ollama\nFull graph context in prompt\nOutput: ColumnPolicySchema"]:::llm',
+'      P4E["Column Policy\n: PII classification\n: Masking strategy\n: Constraint profile\n: Business importance\n: Dedup mode, Edge case flags"]:::llm',
+'    end',
+'',
+'    subgraph REV_SUB["Step 4.4 : Human Review Gate"]',
+'      P4F{"Confidence\nbelow threshold?"}:::human',
+'      P4G["Human Review Queue\napprove / correct / skip\nblocks pipeline until resolved"]:::human',
+'    end',
+'',
+'    subgraph STRAT_SUB["Step 4.5 : Generation Strategy"]',
+'      P4H["LLM CALL 2\nStrategy Planner\nInput: all column policies\nOutput: GenerationStrategySchema"]:::llm',
+'      P4I["Strategy\n: Temporal constraints\n: Post-generation rules\n: Edge case injection pct"]:::llm',
+'    end',
+'  end',
+'',
+'  P3C --> P4A',
+'  P3C --> P4B',
+'  P4A --> P4C',
+'  P4B --> P4C',
+'  P4C --> P4D',
+'  P4D --> P4E',
+'  P4E --> P4F',
+'  P4F -->|"low confidence"| P4G',
+'  P4F -->|"high confidence"| P4H',
+'  P4G -->|"approved"| P4H',
+'  P4E --> P4H',
+'  P4H --> P4I',
+'',
+'  subgraph P5["PHASE 5 : Synthetic Data Generation, Rule-Based"]',
+'    direction TB',
+'    P5A["Topological Sort\nParent tables generated first\nto satisfy FK ordering"]:::rule',
+'    P5B["PII Masking Engine\nFaker-based realistic\nsubstitutions on source data"]:::rule',
+'    P5C["Table Profiling\n: Structural cols: PK, FK, status, date\n: Modeled cols: free-form values\n: Sensitive cols: PII flagged"]:::rule',
+'    P5D["Structural Generator\nDeterministic: PKs, FKs,\nallowed values, dates, codes"]:::rule',
+'    P5E["Rule-Based Generator\nDistribution sampling for\nmodeled columns"]:::rule',
+'    P5F["Shared Repairs\n: FK stitching to parent tables\n: Allowed-value enforcement\n: Temporal constraint fixes\n: Uniqueness checks"]:::rule',
+'    P5G["Boundary Key Registry\nCross-domain FK stitching\npersisted to operational DB"]:::db',
+'    P5H["Edge Case Injection\nNULLs, zeros, min/max,\nboundary values, duplicates"]:::rule',
+'    P5I["Dedup Engine\nSHA-256 mode-aware\nentity / reference / event"]:::rule',
+'  end',
+'',
+'  P4I --> P5A',
+'  P5A --> P5B',
+'  P5B --> P5C',
+'  P5C --> P5D',
+'  P5D --> P5E',
+'  P5E --> P5F',
+'  P5F --> P5G',
+'  P5G --> P5H',
+'  P5H --> P5I',
+'',
+'  subgraph P6["PHASE 6 : Validation Gate"]',
+'    direction TB',
+'    P6A["Statistical Fidelity\nKS Test + Jensen-Shannon\nDivergence per column"]:::vld',
+'    P6B["PII Leakage Check\nPresidio re-scan +\nre-identification risk score"]:::vld',
+'    P6C["Lineage Integrity\nFK referential checks\nacross all generated tables"]:::vld',
+'    P6D["Business Rule Assertions\nRules from strategy post_generation_rules"]:::vld',
+'    P6E{"All checks\npassed?"}:::vld',
+'    P6F["LLM CALL 3\nFailure Diagnosis Agent\nRoot cause + strategy update\nretry loop, max 3"]:::llm',
+'  end',
+'',
+'  P5I --> P6A',
+'  P5I --> P6B',
+'  P5I --> P6C',
+'  P5I --> P6D',
+'  P6A --> P6E',
+'  P6B --> P6E',
+'  P6C --> P6E',
+'  P6D --> P6E',
+'  P6E -->|"failures"| P6F',
+'  P6F -.->|"retry with updated strategy"| P5D',
+'',
+'  subgraph P7["PHASE 7 : Delivery and Defect Detection"]',
+'    direction TB',
+'    P7A["Delivery Packager\nParquet or CSV + gzip\n+ manifest.json"]:::out',
+'    P7B["Production Defect Detector\nSQL validators against live source DB\nReports only REAL bad rows\nRespects rule overrides"]:::out',
+'    P7C["Output Bundle\nproduction_defects.json\nactual PKs + cross-table impact"]:::out',
+'  end',
+'',
+'  P6E -->|"pass"| P7A',
+'  SOURCES -.->|"live SQL scan"| P7B',
+'  P7A --> P7C',
+'  P7B --> P7C',
+'',
+'  subgraph OUTGRP["OUTPUT"]',
+'    direction LR',
+'    O1["output/synthetic/run_id/\n: .parquet per table\n: manifest.json\n: production_defects.json"]:::out',
+'  end',
+'',
+'  P7C --> O1',
+'',
+'  subgraph EC["FEATURE : Customizable Edge Case Detection"]',
+'    direction TB',
+'',
+'    subgraph EC_RULES["Defect Rule Catalog"]',
+'      EC1["13 SQL Validator Rules\nnegative_balance, ssn_wrong_length,\nemail_invalid, fk_dangling, etc.\nEach: table, column, WHERE, severity"]:::vld',
+'    end',
+'',
+'    subgraph EC_HITL["Human-in-the-Loop Customization"]',
+'      EC2["Human Reviews Each Rule\nFlag = keep detecting\nAllow = stop flagging\nCustomize = change severity or reason"]:::human',
+'      EC3["LLM CALL 4\nRule Analyzer\nAnalyzes rule in business context\nSuggests action + rationale"]:::llm',
+'      EC4{"Human Decision"}:::human',
+'      EC5["DefectRuleConfig saved\naction_mode: flag / allow / customize\ncustom_severity, custom_reason\nreview_status: approved"]:::db',
+'    end',
+'  end',
+'',
+'  P7B -.->|"rule catalog"| EC1',
+'  EC1 --> EC2',
+'  EC2 -->|"Ask LLM"| EC3',
+'  EC3 --> EC4',
+'  EC2 --> EC4',
+'  EC4 -->|"approve / reject / customize"| EC5',
+'  EC5 -.->|"overrides applied\nnext defect scan"| P7B',
+'',
+'  subgraph FCS["FEATURE : Failed Case Replication"]',
+'    direction TB',
+'',
+'    subgraph FCS_INPUT["User Input : Failed ID"]',
+'      FC1["Select Root Table\ndropdown of traceable tables"]:::fc',
+'      FC2["Select ID Column\ninferred PK or _ID/_NO columns"]:::fc',
+'      FC3["Select Failed ID Value\ndropdown of actual values"]:::fc',
+'    end',
+'',
+'    subgraph FCS_TRACE["BFS Trace Across Tables"]',
+'      FC4["Trace Case Service\nBFS traversal of FK relationships\nmax depth: 3 levels"]:::fc',
+'      FC5["Root Row + Related Rows\nupstream parent tables\ndownstream child tables\nrelationship metadata"]:::fc',
+'    end',
+'',
+'    subgraph FCS_GEN["Synthetic Replica Generation"]',
+'      FC6["Load Column Policies\nfrom operational DB"]:::fc',
+'      FC7["PII Masking Engine\nconsistent value mapping\nnames, SSNs, emails replaced\nFK values preserved"]:::rule',
+'      FC8["Synthetic Scenario Bundle\nscenario_id stored in DB\nmasked rows for all related tables"]:::fc',
+'    end',
+'  end',
+'',
+'  SOURCES -.->|"query source rows"| FC4',
+'  FC1 --> FC2',
+'  FC2 --> FC3',
+'  FC3 -->|"trace"| FC4',
+'  FC4 --> FC5',
+'  FC5 -->|"generate"| FC6',
+'  FC6 --> FC7',
+'  FC7 --> FC8',
+'  ODB -.->|"column policies"| FC6',
+'  FC8 -.->|"scenario saved"| ODB',
+'',
+'  subgraph DASH["REACT DASHBOARD : localhost:5173"]',
+'    direction LR',
+'    D1["Pipeline\nProgress"]:::source',
+'    D2["Human\nReview"]:::human',
+'    D3["Policy Viewer\n+ LLM Reasoning"]:::llm',
+'    D4["Data\nComparison"]:::source',
+'    D5["Edge Cases\n+ Rule Customization"]:::vld',
+'    D6["Knowledge\nGraph Viz"]:::kg',
+'    D7["Failed Cases\nReplication"]:::fc',
+'  end',
+'',
+'  O1 --> DASH',
+'  P4G -.->|"flagged items"| D2',
+'  EC5 -.->|"rule overrides"| D5',
+'  FC8 -.->|"scenario results"| D7',
+'',
+'  ODB[("Operational DB\nsynthetic_data.db\nPolicies, Strategies\nRun logs, Review queue\nBoundary keys, Model registry\nDefectRuleConfig\nFailedCaseScenario")]:::db',
+'',
+'  P4E -.->|"persist policies"| ODB',
+'  P4I -.->|"persist strategies"| ODB',
+'  ODB -.->|"cache hit = skip LLM"| P4D',
+'  P5G -.->|"boundary keys"| ODB',
+].join('\n');
+
+mermaid.initialize({
+  startOnLoad: false,
+  theme: 'dark',
+  flowchart: {
+    useMaxWidth: false,
+    htmlLabels: true,
+    curve: 'basis',
+    padding: 18,
+    nodeSpacing: 40,
+    rankSpacing: 55,
+  },
+  themeVariables: {
+    darkMode: true,
+    background: '#0f1117',
+    primaryColor: '#1e293b',
+    primaryTextColor: '#e2e8f0',
+    primaryBorderColor: '#4a5568',
+    lineColor: '#64748b',
+    secondaryColor: '#1e293b',
+    tertiaryColor: '#1e293b',
+    clusterBkg: 'rgba(30,41,59,0.6)',
+    clusterBorder: '#334155',
+    fontSize: '13px',
+  },
+});
+
+async function renderDiagram() {
+  try {
+    const { svg } = await mermaid.render('mermaid-svg', DIAGRAM);
+    document.getElementById('diagram-target').innerHTML = svg;
+    centerDiagram();
+  } catch (err) {
+    document.getElementById('diagram-target').innerHTML =
+      '<pre style="color:#f87171;padding:40px;white-space:pre-wrap;">Mermaid render error:\n' + err.message + '</pre>';
+    console.error('Mermaid error:', err);
+  }
+}
+renderDiagram();
+
+let currentZoom = 1;
+let panX = 24;
+let panY = 16;
+let isDragging = false;
+let dragOffsetX = 0;
+let dragOffsetY = 0;
+
+function applyTransform() {
+  document.getElementById('diagram-target').style.transform =
+    'translate(' + panX + 'px, ' + panY + 'px) scale(' + currentZoom + ')';
+}
+
+function centerDiagram() {
+  var wrap = document.querySelector('.diagram-wrap');
+  var svg = document.querySelector('#diagram-target svg');
+  if (!wrap || !svg) return;
+
+  var svgWidth = 0;
+  if (svg.viewBox && svg.viewBox.baseVal && svg.viewBox.baseVal.width) {
+    svgWidth = svg.viewBox.baseVal.width;
+  } else {
+    svgWidth = svg.getBBox().width || svg.clientWidth || 0;
+  }
+
+  panX = Math.max(24, (wrap.clientWidth - (svgWidth * currentZoom)) / 2);
+  panY = 16;
+  applyTransform();
+}
+
+function zoomTo(level) {
+  currentZoom = level;
+  applyTransform();
+  document.getElementById('zoomLabel').textContent = 'Zoom: ' + Math.round(level * 100) + '%';
+  document.querySelectorAll('.controls button').forEach(function(b) {
+    var t = b.textContent.trim();
+    if (t.endsWith('%') && !t.startsWith('Zoom')) {
+      b.classList.toggle('active', t === Math.round(level * 100) + '%');
+    }
+  });
+}
+
+function resetView() {
+  currentZoom = 1;
+  document.getElementById('zoomLabel').textContent = 'Zoom: 100%';
+  document.querySelectorAll('.controls button').forEach(function(b) {
+    var t = b.textContent.trim();
+    if (t.endsWith('%') && !t.startsWith('Zoom')) {
+      b.classList.toggle('active', t === '100%');
+    }
+  });
+  centerDiagram();
+}
+
+var diagramWrap = document.querySelector('.diagram-wrap');
+
+diagramWrap.addEventListener('pointerdown', function(e) {
+  if (e.button !== 0) return;
+  isDragging = true;
+  dragOffsetX = e.clientX - panX;
+  dragOffsetY = e.clientY - panY;
+  diagramWrap.classList.add('dragging');
+  if (diagramWrap.setPointerCapture) {
+    diagramWrap.setPointerCapture(e.pointerId);
+  }
+});
+
+diagramWrap.addEventListener('pointermove', function(e) {
+  if (!isDragging) return;
+  panX = e.clientX - dragOffsetX;
+  panY = e.clientY - dragOffsetY;
+  applyTransform();
+});
+
+function stopDragging(e) {
+  if (!isDragging) return;
+  isDragging = false;
+  diagramWrap.classList.remove('dragging');
+  if (diagramWrap.releasePointerCapture && e && typeof e.pointerId === 'number') {
+    try { diagramWrap.releasePointerCapture(e.pointerId); } catch (err) {}
+  }
+}
+
+diagramWrap.addEventListener('pointerup', stopDragging);
+diagramWrap.addEventListener('pointercancel', stopDragging);
+diagramWrap.addEventListener('pointerleave', function(e) {
+  if (isDragging && e.buttons === 0) stopDragging(e);
+});
+
+diagramWrap.addEventListener('wheel', function(e) {
+  e.preventDefault();
+
+  var nextZoom = currentZoom + (e.deltaY > 0 ? -0.1 : 0.1);
+  nextZoom = Math.max(0.3, Math.min(2, Math.round(nextZoom * 100) / 100));
+  if (nextZoom === currentZoom) return;
+
+  var rect = diagramWrap.getBoundingClientRect();
+  var pointerX = e.clientX - rect.left;
+  var pointerY = e.clientY - rect.top;
+  var worldX = (pointerX - panX) / currentZoom;
+  var worldY = (pointerY - panY) / currentZoom;
+
+  currentZoom = nextZoom;
+  panX = pointerX - (worldX * currentZoom);
+  panY = pointerY - (worldY * currentZoom);
+  zoomTo(currentZoom);
+}, { passive: false });
+
+window.addEventListener('resize', function() {
+  centerDiagram();
+});
+
+const phaseInfo = {
+  ingestion: {
+    title: 'Phase 1 : Schema Ingestion',
+    badge: 'INGESTION', badgeColor: '#ff9800',
+    text: 'Connects to the source database (SQLite or DuckDB), reflects table schemas, parses DDL files for explicit FK constraints, and mines historical query logs for implicit JOIN relationships. All relationships are merged into a single unified list.'
+  },
+  kg: {
+    title: 'Phases 2-3 : Knowledge Graph + Domain Partitioning',
+    badge: 'KNOWLEDGE GRAPH', badgeColor: '#3f51b5',
+    text: 'Builds a NetworkX in-memory graph where tables are nodes and FK relationships are edges. Loads the abbreviation dictionary from config. Runs Louvain community detection to partition tables into business domains (customer, billing, network). Falls back to keyword heuristics if Louvain fails.'
+  },
+  intelligence: {
+    title: 'Phase 4 : Intelligence + Semantic Reasoning',
+    badge: 'INTELLIGENCE', badgeColor: '#e91e63',
+    text: 'The core reasoning phase. For each column: (1) Presidio scans for PII, (2) abbreviations are expanded via the knowledge graph, (3) the LLM receives full graph context and produces a structured ColumnPolicySchema, (4) low-confidence results go to the human review queue. Finally, the LLM generates a table-level GenerationStrategySchema with temporal constraints and business rules.'
+  },
+  synthesis: {
+    title: 'Phase 5 : Synthetic Data Generation',
+    badge: 'RULE-BASED SYNTHESIS', badgeColor: '#009688',
+    text: 'Entirely deterministic. Tables are sorted topologically (parents first). Source data is masked via Faker, then profiled into structural vs. modeled columns. Structural columns (PKs, FKs, status codes, dates) are generated deterministically. Modeled columns use distribution sampling. FK stitching, temporal repairs, edge case injection, and SHA-256 deduplication follow.'
+  },
+  validation: {
+    title: 'Phase 6 : Validation Gate',
+    badge: 'VALIDATION', badgeColor: '#9c27b0',
+    text: 'Four parallel checks per table: (1) KS test + Jensen-Shannon divergence for statistical fidelity, (2) Presidio re-scan for PII leakage + re-identification risk, (3) FK referential integrity across generated tables, (4) business rule assertions from the strategy. On failure, the LLM diagnoses the root cause and may update the strategy for retry (max 3).'
+  },
+  delivery: {
+    title: 'Phase 7 : Delivery + Dashboard',
+    badge: 'DELIVERY', badgeColor: '#4caf50',
+    text: 'Packages synthetic data as Parquet/CSV with gzip compression and a manifest.json. The Production Defect Detector scans the LIVE source DB via SQL validators and reports real bad rows (not simulated). The React dashboard provides pipeline progress, human review, policy viewer, data comparison, defect panel, and graph visualization.'
+  },
+  llm: {
+    title: 'LLM Touchpoints (4 total)',
+    badge: 'LLM CALLS', badgeColor: '#e91e63',
+    text: 'Four points in the pipeline call the LLM (Gemini or Ollama): (1) Column Classification: classifies each column with full knowledge graph context, (2) Strategy Planning: formulates temporal constraints and business rules per table, (3) Failure Diagnosis: analyzes validation failures and suggests strategy adjustments, (4) Rule Analyzer: analyzes defect detection rules in business context and suggests customizations. Everything else is rule-based.'
+  },
+  edgecustom: {
+    title: 'Feature : Customizable Edge Case Detection',
+    badge: 'EDGE CASE CUSTOMIZATION', badgeColor: '#ffc107',
+    text: 'Defect detection rules are no longer hardcoded. Each of the 13 SQL validator rules (negative balance, SSN format, dangling FKs, etc.) can be reviewed by a human. The user can Flag (keep detecting), Allow (stop flagging, e.g. negative balance is valid for this business), or Customize (change severity/reason). An LLM analyzes rules in business context and suggests actions. Decisions are persisted to DefectRuleConfig and applied on the next defect scan.'
+  },
+  failedcase: {
+    title: 'Feature : Failed Case Replication',
+    badge: 'FAILED CASE REPLICATION', badgeColor: '#1565c0',
+    text: 'When a production order fails in a higher environment, the user inputs the failed ID via dropdown menus (table, ID column, value). The system traces that ID across all related tables using BFS traversal of FK relationships (max 3 levels deep). It then generates a synthetic replica of the entire scenario: all related rows are masked (PII replaced via MaskingEngine, FK values preserved) and stored as a FailedCaseScenario. This allows the failed case to be replicated in lower environments for testing.'
+  }
+};
+
+function showPhase(phase) {
+  var callout = document.getElementById('callout');
+
+  if (phase === 'all') {
+    document.querySelectorAll('#diagram-target .node rect, #diagram-target .node polygon, #diagram-target .node circle, #diagram-target .node .label, #diagram-target .node .nodeLabel, #diagram-target .cluster rect, #diagram-target .cluster .label, #diagram-target .edgePath path, #diagram-target .edgeLabel').forEach(function(el) {
+      el.style.opacity = '';
+    });
+    callout.classList.remove('visible');
+    return;
+  }
+
+  document.querySelectorAll('#diagram-target .node rect, #diagram-target .node polygon, #diagram-target .node circle').forEach(function(el) { el.style.opacity = '0.12'; });
+  document.querySelectorAll('#diagram-target .node .label, #diagram-target .node .nodeLabel').forEach(function(el) { el.style.opacity = '0.12'; });
+  document.querySelectorAll('#diagram-target .cluster rect').forEach(function(el) { el.style.opacity = '0.08'; });
+  document.querySelectorAll('#diagram-target .cluster .label').forEach(function(el) { el.style.opacity = '0.08'; });
+  document.querySelectorAll('#diagram-target .edgePath path').forEach(function(el) { el.style.opacity = '0.06'; });
+  document.querySelectorAll('#diagram-target .edgeLabel').forEach(function(el) { el.style.opacity = '0.06'; });
+
+  var phaseNodes = {
+    ingestion:    ['SOURCES','S1','S2','S3','P1','P1A','P1B','P1C','P1D'],
+    kg:           ['P2','P2A','P2B','P3','P3A','P3B','P3C'],
+    intelligence: ['P4','PII_SUB','ABBR_SUB','LLM_SUB','REV_SUB','STRAT_SUB',
+                   'P4A','P4B','P4C','P4D','P4E','P4F','P4G','P4H','P4I'],
+    synthesis:    ['P5','P5A','P5B','P5C','P5D','P5E','P5F','P5G','P5H','P5I'],
+    validation:   ['P6','P6A','P6B','P6C','P6D','P6E','P6F'],
+    delivery:     ['P7','P7A','P7B','P7C','OUTGRP','O1','DASH','D1','D2','D3','D4','D5','D6','D7'],
+    edgecustom:   ['EC','EC_RULES','EC_HITL','EC1','EC2','EC3','EC4','EC5','P7B','D5'],
+    failedcase:   ['FCS','FCS_INPUT','FCS_TRACE','FCS_GEN','FC1','FC2','FC3','FC4','FC5','FC6','FC7','FC8','D7'],
+    llm:          ['LLM_SUB','STRAT_SUB','P4D','P4E','P4H','P4I','P6F','EC3','D3']
+  };
+
+  var ids = phaseNodes[phase] || [];
+  ids.forEach(function(id) {
+    document.querySelectorAll('#diagram-target [id*="' + id + '"]').forEach(function(el) {
+      el.style.opacity = '';
+      el.querySelectorAll('rect, polygon, circle, .label, .nodeLabel').forEach(function(child) { child.style.opacity = ''; });
+      var p = el.closest('.node, .cluster');
+      if (p) {
+        p.style.opacity = '';
+        p.querySelectorAll('rect, polygon, circle, .label, .nodeLabel').forEach(function(child) { child.style.opacity = ''; });
+      }
+    });
+  });
+
+  var info = phaseInfo[phase];
+  if (info) {
+    document.getElementById('calloutBadge').textContent = info.badge;
+    document.getElementById('calloutBadge').style.background = info.badgeColor;
+    document.getElementById('calloutBadge').style.color = '#fff';
+    document.getElementById('calloutTitle').textContent = info.title;
+    document.getElementById('calloutText').textContent = info.text;
+    callout.classList.add('visible');
+  }
+}
+
+document.addEventListener('keydown', function(e) {
+  if (e.key === '+' || e.key === '=') zoomTo(Math.min(currentZoom + 0.1, 2));
+  if (e.key === '-') zoomTo(Math.max(currentZoom - 0.1, 0.3));
+  if (e.key === '0') zoomTo(1);
+  if (e.key === 'Escape') showPhase('all');
+});
+</script>
+</body>
+</html>

@@ -6,6 +6,7 @@ import {
   Brain,
   CheckCircle,
   Database,
+  GitBranchPlus,
   LayoutGrid,
   Network,
   PlayCircle,
@@ -18,6 +19,7 @@ import DataViewer from './DataViewer';
 import GraphView from './GraphView';
 import ReasoningPanel from './ReasoningPanel';
 import EdgeCasePanel from './EdgeCasePanel';
+import FailedCasePanel from './FailedCasePanel';
 
 const API_BASE = "http://localhost:8001/api";
 
@@ -27,6 +29,7 @@ const MENU_ITEMS = [
   { id: 'insights', label: 'Live Progress', icon: Sparkles },
   { id: 'data', label: 'View Data', icon: Database },
   { id: 'edge_cases', label: 'Edge Cases', icon: AlertTriangle },
+  { id: 'failed_cases', label: 'Failed Cases', icon: GitBranchPlus },
   { id: 'graph', label: 'Graph', icon: Network },
   { id: 'policies', label: 'Policies', icon: Brain },
 ];
@@ -96,7 +99,7 @@ const Dashboard = () => {
   const [runs, setRuns] = useState([]);
   const [dataSources, setDataSources] = useState(FALLBACK_SOURCES);
   const [loadingSources, setLoadingSources] = useState(true);
-  const [selectedSourceName, setSelectedSourceName] = useState('telecom_poc');
+  const [selectedSourceName, setSelectedSourceName] = useState('telecom_sqlite');
   const [selectedRunId, setSelectedRunId] = useState(null);
   const [status, setStatus] = useState(null);
   const [stats, setStats] = useState(null);
@@ -543,6 +546,14 @@ const Dashboard = () => {
             embedded
             sourceName={selectedSourceName}
             runId={selectedRunId}
+            onSelectTable={setSelectedTable}
+          />
+        )}
+
+        {active === 'failed_cases' && (
+          <FailedCasePanel
+            sourceName={selectedSourceName}
+            embedded
             onSelectTable={setSelectedTable}
           />
         )}
